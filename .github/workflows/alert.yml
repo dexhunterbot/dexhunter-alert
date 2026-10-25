@@ -10,9 +10,14 @@ on:
         type: boolean
         default: true
 
+concurrency:
+  group: dexhunter-alert
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
@@ -34,6 +39,8 @@ jobs:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           MIN_ADA: "10000"
+          POLL_SEC: "30"
+          RUN_MINUTES: "345"
           TEST_MODE: ${{ inputs.test || 'false' }}
 
       - uses: actions/cache/save@v4
