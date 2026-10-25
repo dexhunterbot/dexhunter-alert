@@ -1,0 +1,43 @@
+name: DexHunter big sell alert
+
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Sift message test f Telegram"
+        type: boolean
+        default: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: seen.json
+          key: seen-${{ github.run_id }}
+          restore-keys: seen-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - run: python alert.py
+        env:
+          DEXHUNTER_KEY: ${{ secrets.DEXHUNTER_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          MIN_ADA: "10000"
+          TEST_MODE: ${{ inputs.test || 'false' }}
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: seen.json
+          key: seen-${{ github.run_id }}
