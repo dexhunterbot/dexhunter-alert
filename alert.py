@@ -1,5 +1,5 @@
 """
-DexHunter big-sell alert -> Telegram (real-time)
+DexHunter big buy/sell alert -> Telegram (real-time)
 Kaychouf DexHunter kol POLL_SEC tanya, w ila chi wa7ed ba3 token b > MIN_ADA ADA, kaysift message f Telegram.
 """
 import json
@@ -14,7 +14,7 @@ API = "https://api-us.dexhunterv3.app"
 KEY = os.environ.get("DEXHUNTER_KEY", "").strip()
 TG_TOKEN = os.environ.get("TG_TOKEN", "").strip()
 TG_CHAT = os.environ.get("TG_CHAT_ID", "").strip()
-MIN_ADA = float(os.environ.get("MIN_ADA", "10000"))
+MIN_ADA = float(os.environ.get("MIN_ADA", "5000"))
 POLL_SEC = int(os.environ.get("POLL_SEC", "30"))
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "0"))  # 0 = check wa7ed w ykhrej
 LOOKBACK_MIN = int(os.environ.get("LOOKBACK_MIN", "75"))
@@ -134,12 +134,17 @@ def process(orders, since, seen):
     for o in orders:
         tin = g(o, "token_id_in", "tokenIdIn", "token_in", default="")
         tout = g(o, "token_id_out", "tokenIdOut", "token_out", default="")
-        if is_ada(tin) or not is_ada(tout):
-            continue  # machi bay3a token -> ADA
+        if is_ada(tout) and not is_ada(tin):
+            kind = "sell"  # token -> ADA
+            ada = ada_amount(g(o, "actual_out_amount", "amount_out", "expected_out_amount", default=0))
+        elif is_ada(tin) and not is_ada(tout):
+            kind = "buy"   # ADA -> token
+            ada = ada_amount(g(o, "amount_in", "amountIn", default=0))
+        else:
+            continue
         ts = to_ts(g(o, *TS_FIELDS))
         if ts and ts < since:
             continue
-        ada = ada_amount(g(o, "actual_out_amount", "amount_out", "expected_out_amount", default=0))
         if ada < MIN_ADA:
             continue
         tx = g(o, "tx_hash", "txHash", "_id", "id", default="")
@@ -147,17 +152,21 @@ def process(orders, since, seen):
         if uid in seen:
             continue
         seen.add(uid)
-        amt_in = g(o, "amount_in", "amountIn", default="?")
+        tok = tin if kind == "sell" else tout
+        amt = g(o, "amount_in", "amountIn", default="?") if kind == "sell" else \
+            g(o, "actual_out_amount", "amount_out", "expected_out_amount", default="?")
         try:
-            amt_in = f"{float(amt_in):,.0f}"
+            amt = f"{float(amt):,.0f}"
         except Exception:
             pass
-        name = token_name(tin)
+        name = token_name(tok)
         when = datetime.fromtimestamp(ts, timezone.utc).strftime("%H:%M UTC") if ts else "?"
         link = f'\n<a href="https://cardanoscan.io/transaction/{tx}">Chouf transaction</a>' if len(str(tx)) == 64 else ""
-        tg(f"🚨 <b>BIG SELL</b> f DexHunter\n"
+        head = "🔴 <b>BIG SELL</b>" if kind == "sell" else "🟢 <b>BIG BUY</b>"
+        verb = "Tba3" if kind == "sell" else "Chra"
+        tg(f"{head} f DexHunter\n"
            f"Token: <b>{name}</b>\n"
-           f"Tba3: {amt_in} {name}\n"
+           f"{verb}: {amt} {name}\n"
            f"Qima: <b>{ada:,.0f} ADA</b>\n"
            f"Wqt: {when}{link}")
         alerts += 1
@@ -199,7 +208,7 @@ def main():
             print(f"Check 1: {len(orders)} ordres, {a} alerte(s)")
             if TEST:
                 tg(f"✅ Test: robot khddam (real-time, kol {POLL_SEC}s). "
-                   f"Jbed {len(orders)} ordres, l9a {a} vente(s) > {MIN_ADA:,.0f} ADA.")
+                   f"Jbed {len(orders)} ordres, l9a {a} buy/sell > {MIN_ADA:,.0f} ADA.")
         if a:
             print(f"{datetime.now(timezone.utc):%H:%M:%S} sifet {a} alerte(s)")
             save(seen)
