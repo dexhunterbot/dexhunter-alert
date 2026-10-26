@@ -1,7 +1,7 @@
 """
 Wallet pump alert -> Telegram
 Kaychouf tokens li f wallet, w kol mra token kaytl3 +10% (b MCAP) mn l'entry
-(+10%, +20%, +30%...), kaysifet notif.
+(+10%, +20%, +30%...), kaysifet notif. W nafs l7aja ila hbat -10%, -20%...
 """
 import json
 import math
@@ -187,23 +187,32 @@ def check(state, first):
         elif h["name"].upper() in manual and st.get("src") != "manual":
             st.update(entry=manual[h["name"].upper()], level=0, src="manual")
         gain = (mcap / st["entry"] - 1) * 100
-        level = int(math.floor(gain / STEP)) if gain > 0 else 0
-        if level > st["level"]:
-            st["level"] = level
-            tg(f"\U0001F680 <b>{h['name']} +{gain:.0f}%</b>\n"
-               f"\U0001F4CA MCAP: {kfmt(st['entry'])} ➜ {kfmt(mcap)} ADA\n"
-               f"\U0001F4BC 3ndk: {kfmt(h['qty'])} {h['name']} ≈ {kfmt(value)} ADA\n"
+        old = level = st["level"]
+        while gain >= (level + 1) * STEP:
+            level += 1
+        while gain <= (level - 1) * STEP:
+            level -= 1
+        st["level"] = level
+        if level != old and level != 0:
+            cost = h["qty"] * st["entry"] / sup
+            pnl = value - cost
+            head = (f"\U0001F680 <b>{h['name']} +{gain:.0f}%</b>" if gain > 0
+                    else f"\U0001F53B <b>{h['name']} {gain:.0f}%</b>")
+            pnl_line = (f"\U0001F7E2 Profit: +{kfmt(pnl)} ADA" if pnl >= 0
+                        else f"\U0001F534 Loss: -{kfmt(-pnl)} ADA")
+            tg(f"{head}\n"
+               f"\U0001F4CA MCAP: {kfmt(st['entry'])} \u279C {kfmt(mcap)} ADA\n"
+               f"\U0001F4BC 3ndk: {kfmt(h['qty'])} {h['name']} \u2248 {kfmt(value)} ADA\n"
+               f"{pnl_line}\n"
                f"\U0001F4C4 CA: <code>{tid}</code>\n"
-               f"\U0001F517 <a href=\"https://app.dexhunter.io/swap?tokenIdSell={tid}&tokenIdBuy=\">Bi3 f DexHunter</a>")
+               f"\U0001F517 <a href=\"https://app.dexhunter.io/swap?tokenIdSell={tid}&tokenIdBuy=\">DexHunter</a>")
             sent += 1
-        elif level < st["level"] - 1:
-            st["level"] = level  # hbat bzaf: ila rja3 tl3 n3awdo nsiftou
         st["last"] = mcap
     for tid in list(state):
         if tid not in hold:
             del state[tid]  # token tba3
     if first and TEST:
-        lines = [f"✅ Wallet alert khddam. Kanraqeb {len(state)} token (kol +{STEP:g}% mn entry):"]
+        lines = [f"✅ Wallet alert khddam. Kanraqeb {len(state)} token (kol \u00b1{STEP:g}% mn entry):"]
         for tid, st in state.items():
             g = (st.get("last", st["entry"]) / st["entry"] - 1) * 100
             lines.append(f"• {hold[tid]['name']}: entry {kfmt(st['entry'])} → daba {kfmt(st.get('last'))} ({g:+.1f}%)")
