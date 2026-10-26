@@ -1,4 +1,4 @@
-name: DexHunter big sell alert
+name: DexHunter big buy/sell alert
 
 on:
   schedule:
@@ -38,7 +38,7 @@ jobs:
           DEXHUNTER_KEY: ${{ secrets.DEXHUNTER_KEY }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          MIN_ADA: "10000"
+          MIN_ADA: "5000"
           POLL_SEC: "30"
           RUN_MINUTES: "345"
           TEST_MODE: ${{ inputs.test || 'false' }}
