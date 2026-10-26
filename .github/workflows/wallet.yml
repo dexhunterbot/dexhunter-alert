@@ -1,0 +1,52 @@
+name: Wallet pump alert
+
+on:
+  schedule:
+    - cron: "22 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Sift message test f Telegram"
+        type: boolean
+        default: true
+
+concurrency:
+  group: wallet-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: wallet_state.json
+          key: wallet-${{ github.run_id }}
+          restore-keys: wallet-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests
+
+      - run: python -u wallet.py
+        env:
+          DEXHUNTER_KEY: ${{ secrets.DEXHUNTER_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          WALLET_ADDR: ${{ secrets.WALLET_ADDR }}
+          ENTRY_MCAP: "SOLADA=2070000"
+          STEP_PCT: "10"
+          POLL_SEC: "120"
+          RUN_MINUTES: "345"
+          TEST_MODE: ${{ inputs.test || 'false' }}
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: wallet_state.json
+          key: wallet-${{ github.run_id }}
