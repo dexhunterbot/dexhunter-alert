@@ -192,14 +192,12 @@ def process(orders, since, seen):
             lines = [f"\U0001F534 <b>BIG SELL {name} {kfmt(ada)} ADA</b>"]
         else:
             lines = [f"\U0001F7E2 <b>BIG BUY {name} {kfmt(ada)} ADA</b>"]
+        lines.append(f"\U0001F4B0 Price: {pfmt(price)} ADA" if price else "\U0001F4B0 Price: ?")
         lines.append(f"\U0001F4E6 {kfmt(qty)} {name}" if qty else f"\U0001F4E6 ? {name}")
         if impact is not None:
             sign = "-" if kind == "sell" else "+"
             arrow = "\U0001F4C9" if kind == "sell" else "\U0001F4C8"
             lines.append(f"{arrow} Impact: {sign}{abs(impact):.2f}%")
-        if price:
-            lines.append(f"\U0001F4B0 Price: {pfmt(price)} ADA")
-        lines.append(f"\U0001F4C4 CA: <code>{tok}</code>")
         links = [f'<a href="https://app.dexhunter.io/swap?tokenIdSell=&tokenIdBuy={tok}">DexHunter</a>']
         if len(str(tx)) == 64:
             links.append(f'<a href="https://cardanoscan.io/transaction/{tx}">Transaction</a>')
