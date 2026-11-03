@@ -39,6 +39,7 @@ jobs:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           MIN_ADA: "10000"
+          TOKEN_MIN: "NIGHT=50000,STRIKE=50000,SNEK=50000,IAG=50000"
           POLL_SEC: "30"
           RUN_MINUTES: "345"
           TEST_MODE: ${{ inputs.test || 'false' }}
