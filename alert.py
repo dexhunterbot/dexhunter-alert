@@ -176,6 +176,20 @@ def price_move(kind, ada, tok, o):
 BIG_MOVE = float(os.environ.get("BIG_MOVE_PCT", "10"))
 
 
+def _token_min():
+    out = {}
+    for part in os.environ.get("TOKEN_MIN", "").split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            v = num(v)
+            if v:
+                out[k.strip().upper().lstrip("$")] = v
+    return out
+
+
+TOKEN_MIN = _token_min()  # b7al NIGHT=50000,SNEK=50000
+
+
 _names = {}
 
 
@@ -216,6 +230,10 @@ def process(orders, since, seen):
             continue
         if ada < MIN_ADA:
             continue
+        if TOKEN_MIN:
+            need = TOKEN_MIN.get(str(token_name(tin if kind == "sell" else tout)).upper().lstrip("$"))
+            if need and ada < need:
+                continue
         tx = g(o, "tx_hash", "txHash", "_id", "id", default="")
         uid = str(tx or json.dumps(o, sort_keys=True))
         if uid in seen:
