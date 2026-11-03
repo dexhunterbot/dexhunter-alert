@@ -1,8 +1,6 @@
 name: Wallet pump alert
 
 on:
-  schedule:
-    - cron: "22 * * * *"
   workflow_dispatch:
     inputs:
       test:
