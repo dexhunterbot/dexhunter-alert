@@ -42,6 +42,7 @@ WALLET_EVERY = int(os.environ.get("WALLET_EVERY_SEC", "120"))
 WALLET_MIN_VALUE = float(os.environ.get("MIN_VALUE_ADA", "20"))
 SUMMARY_HOUR = int(os.environ.get("SUMMARY_HOUR", "23"))
 TEST = os.environ.get("TEST_MODE", "false").lower() == "true"
+COMMANDS = os.environ.get("COMMANDS", "1") != "0"  # 0 = bla commands (ila bot mchtarak)
 SEEN_FILE = "seen.json"
 STATE_FILE = "state.json"
 
@@ -839,7 +840,8 @@ def main():
             print(f"Check 1: {len(orders)} ordres, {a} alerte(s), wallet {len(state['wallet'])} tokens")
             if TEST:
                 tg(f"✅ Bot khddam: alerts fo9 {kfmt(default_min())} ADA, \U0001F525 clusters, "
-                   f"wallet ({len(state['wallet'])} tokens), résumé f {SUMMARY_HOUR}:00.\nKtb /help bach tchouf l'commands.")
+                   f"wallet ({len(state['wallet'])} tokens), résumé f {SUMMARY_HOUR}:00."
+                   + ("\nKtb /help bach tchouf l'commands." if COMMANDS else ""))
         try:
             json.dump(list(seen)[-5000:], open(SEEN_FILE, "w"))
         except Exception:
@@ -848,7 +850,11 @@ def main():
         since = loop_start - 600
         if RUN_MINUTES <= 0 or time.time() + POLL_SEC > end:
             break
-        poll_commands(max(1, POLL_SEC - (time.time() - loop_start)))
+        wait = max(1, POLL_SEC - (time.time() - loop_start))
+        if COMMANDS:
+            poll_commands(wait)
+        else:
+            time.sleep(wait)
     save_state()
     print(f"Sala: {checks} checks, {total} alerte(s)")
 
