@@ -13,6 +13,7 @@ import math
 import re
 import os
 import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -349,9 +350,14 @@ def load_state():
         pass
 
 
+ZLOCK = threading.RLock()
+
+
 def save_state():
     try:
-        json.dump(state, open(STATE_FILE, "w"))
+        with ZLOCK:
+            data = json.dumps(state)
+        open(STATE_FILE, "w").write(data)
     except Exception as e:
         print("Save state error:", e)
 
@@ -1158,7 +1164,8 @@ def zing_add(addr, name):
     if len(z) >= 25:
         return "⚠️ You reached 25 wallets. Remove one with /zing remove first."
     tip = koios_get("tip", {})
-    z[name] = {"addr": addr, "stake": stake, "height": tip[0].get("block_no", 0) if tip else 0, "pending": []}
+    with ZLOCK:
+        z[name] = {"addr": addr, "stake": stake, "height": tip[0].get("block_no", 0) if tip else 0, "pending": []}
     save_state()
     return (f"✅ Now tracking <b>{name}</b> \U0001F433\n{addr_link(addr)}\n"
             f"Every buy, sell, send and receive will be posted in #zing-wallet.")
@@ -1168,7 +1175,8 @@ def zing_remove(key):
     name, w = find_zing(key)
     if not name:
         return f"❌ No tracked wallet named <b>{key}</b>. See /zing list."
-    zings().pop(name, None)
+    with ZLOCK:
+        zings().pop(name, None)
     save_state()
     return f"\U0001F5D1️ Stopped tracking <b>{name}</b>."
 
@@ -1183,14 +1191,92 @@ def zing_list_text():
     return "\n".join(lines)
 
 
+ZING_FAST_SEC = int(os.environ.get("ZING_FAST_SEC", "20"))
+ZING_SLOW_SEC = int(os.environ.get("ZING_SLOW_SEC", "300"))
+_zaddr = {"t": 0, "addrs": [], "stakes": []}
+
+
+def _zing_handle(tx, name, w):
+    """Kaysift message dyal Tx mra wa7da bark (fast w slow ma ykrrouch)."""
+    done = w.setdefault("done", [])
+    if tx["tx_hash"] in done:
+        return
+    done.append(tx["tx_hash"])
+    w["done"] = done[-300:]
+    if not isinstance(w.get("pending"), list):
+        w["pending"] = []
+    try:
+        for m in zing_classify(tx, w["stake"], w["pending"], name):
+            zing_send(m)
+    except Exception as e:
+        print("Zing classify error:", e)
+    w["pending"] = w["pending"][-60:]
+
+
+def zing_fast():
+    """Kol ~20s: Tx jdad dyal ga3 l wallets f call wa7d (address_txs)."""
+    z = zings()
+    stakes = {w["stake"]: n for n, w in list(z.items()) if w.get("stake")}
+    if not stakes:
+        return
+    if time.time() - _zaddr["t"] > 600 or sorted(_zaddr["stakes"]) != sorted(stakes):
+        rows = koios("account_addresses", {"_stake_addresses": list(stakes)})
+        addrs = []
+        for r in rows or []:
+            addrs += r.get("addresses") or []
+        if addrs:
+            _zaddr.update(t=time.time(), addrs=list(dict.fromkeys(addrs)), stakes=list(stakes))
+            print(f"Zing fast: {len(stakes)} wallets, {len(_zaddr['addrs'])} adresses")
+    addrs = _zaddr["addrs"]
+    if not addrs:
+        return
+    h = state.get("zing_fast_h") or 0
+    if not h:
+        tip = koios_get("tip", {})
+        if tip:
+            state["zing_fast_h"] = tip[0].get("block_no", 0)
+        return
+    txs = []
+    for i in range(0, len(addrs), 500):
+        r = koios("address_txs", {"_addresses": addrs[i:i + 500], "_after_block_height": h + 1})
+        if isinstance(r, list):
+            txs += r
+    if not txs:
+        return
+    txs.sort(key=lambda t: (t.get("block_height", 0), t.get("block_time", 0)))
+    hashes = list(dict.fromkeys(t["tx_hash"] for t in txs))[:40]
+    heights = {t["tx_hash"]: t.get("block_height", 0) for t in txs}
+    info = koios("tx_info", {"_tx_hashes": hashes, "_inputs": True, "_assets": True})
+    by = {t["tx_hash"]: t for t in info or []}
+    with ZLOCK:
+        for hsh in hashes:
+            tx = by.get(hsh)
+            if not tx:
+                break
+            inv = {u.get("stake_addr") for u in (tx.get("inputs") or []) + (tx.get("outputs") or [])}
+            for st, name in stakes.items():
+                if st in inv and name in z:
+                    _zing_handle(tx, name, z[name])
+            state["zing_fast_h"] = max(state.get("zing_fast_h") or 0, heights.get(hsh, 0))
+
+
+def zing_fast_loop():
+    while True:
+        t0 = time.time()
+        try:
+            zing_fast()
+        except Exception as e:
+            print("Zing fast error:", e)
+        time.sleep(max(3, ZING_FAST_SEC - (time.time() - t0)))
+
+
 def check_zing():
+    """Safety net (kol ~5 min): wallet b wallet, ila fat chi Tx l fast."""
     z = zings()
     if not z:
         return
     tip = None
     for name, w in list(z.items()):
-        if not isinstance(w.get("pending"), list):
-            w["pending"] = []
         if not w.get("stake"):
             w["stake"] = resolve_stake(w["addr"])
             if not w["stake"]:
@@ -1207,17 +1293,13 @@ def check_zing():
         txs = sorted(txs, key=lambda t: (t.get("block_height", 0), t.get("block_time", 0)))[:40]
         info = koios("tx_info", {"_tx_hashes": [t["tx_hash"] for t in txs], "_inputs": True, "_assets": True})
         by = {t["tx_hash"]: t for t in info or []}
-        for t in txs:
-            tx = by.get(t["tx_hash"])
-            if not tx:
-                continue
-            try:
-                for m in zing_classify(tx, w["stake"], w["pending"], name):
-                    zing_send(m)
-            except Exception as e:
-                print("Zing classify error:", e)
-            w["height"] = max(w["height"], t.get("block_height", 0))
-        w["pending"] = w["pending"][-60:]
+        with ZLOCK:
+            for t in txs:
+                tx = by.get(t["tx_hash"])
+                if not tx:
+                    break
+                _zing_handle(tx, name, w)
+                w["height"] = max(w["height"], t.get("block_height", 0))
 
 
 # =============== Discord bot (/zing, /price ...) ===============
@@ -1698,6 +1780,7 @@ def main():
         sys.exit(1)
     load_state()
     start_discord_bot()
+    threading.Thread(target=zing_fast_loop, daemon=True).start()
     state["streaks"] = {}  # kat3awd tbna mn l'lookback
     seen = set()
     try:
@@ -1729,7 +1812,7 @@ def main():
             except Exception as e:
                 print("Wallet error:", e)
             last_wallet = time.time()
-        if time.time() - last_zing >= max(ZING_EVERY, 20 * len(state.get("zings") or {})):
+        if time.time() - last_zing >= max(ZING_SLOW_SEC, 20 * len(state.get("zings") or {})):
             try:
                 check_zing()
             except Exception as e:
