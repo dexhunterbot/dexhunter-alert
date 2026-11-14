@@ -915,7 +915,8 @@ def short(addr):
 
 
 def addr_link(addr):
-    return f'<a href="https://cardanoscan.io/address/{addr}">{short(addr)}</a>'
+    kind = "stakekey" if addr.startswith("stake1") else "address"
+    return f'<a href="https://cardanoscan.io/{kind}/{addr}">{short(addr)}</a>'
 
 
 def koios_get(path, params):
@@ -968,12 +969,13 @@ def _tokens(d):
     return {k: v for k, v in d.items() if k and abs(v) > 0}
 
 
-def zing_swap_msg(kind, tid, qty, ada, txh):
+def zing_swap_msg(kind, tid, qty, ada, txh, label=None):
+    label = label or ZING_NAME
     name = token_name(tid)
     info = dex1(tid)
     price = ada / qty if qty and ada else None
     icon = "\U0001F7E2" if kind == "buy" else "\U0001F534"
-    lines = [f"\U0001F433 <b>{ZING_NAME} {icon} {'BUY' if kind == 'buy' else 'SELL'} {name}"
+    lines = [f"\U0001F433 <b>{label} {icon} {'BUY' if kind == 'buy' else 'SELL'} {name}"
              + (f" {kfmt(ada)} ADA" if ada else "") + "</b>",
              f"\U0001F4E6 {kfmt(qty)} {name}" + (f" · \U0001F4B0 {pfmt(price)} ADA" if price else "")]
     if info and info.get("mcap_ada"):
@@ -1008,7 +1010,8 @@ def _order_utxos(tx, stake):
     return out
 
 
-def zing_classify(tx, stake, pending):
+def zing_classify(tx, stake, pending, label=None):
+    label = label or ZING_NAME
     """Kayrj3 lista dyal messages. pending = orders li sifethom l DEX w mazal ma t3mmrouch."""
     txh = tx["tx_hash"]
     net, sent, recv = zing_tx_view(tx, stake)
@@ -1027,9 +1030,9 @@ def zing_classify(tx, stake, pending):
     if len(toks) == 1 and abs(ada) > 2:
         tid, q = next(iter(toks.items()))
         if q > 0 and ada < 0:
-            return [zing_swap_msg("buy", tid, q, -ada, txh)]
+            return [zing_swap_msg("buy", tid, q, -ada, txh, label)]
         if q < 0 and ada > 0:
-            return [zing_swap_msg("sell", tid, -q, ada, txh)]
+            return [zing_swap_msg("sell", tid, -q, ada, txh, label)]
 
     # 2) order jdid l DEX: nkhbbiwh 7tta y3mmer
     if to_scripts and ada <= 0:
@@ -1062,18 +1065,18 @@ def zing_classify(tx, stake, pending):
                 tid, q = max(got_t.items(), key=lambda kv: kv[1])
                 spent = o_ada - max(ada, 0)
                 if spent > 2:
-                    return [zing_swap_msg("buy", tid, q, spent, txh)]
+                    return [zing_swap_msg("buy", tid, q, spent, txh, label)]
                 return []
             if o_t and ada > 0 and not got_t:
                 tid, q = next(iter(o_t.items()))
                 gotada = ada - o_ada
                 if gotada > 1:
-                    return [zing_swap_msg("sell", tid, q, gotada, txh)]
+                    return [zing_swap_msg("sell", tid, q, gotada, txh, label)]
                 return []
             return []
         if got_t:
             tid, q = max(got_t.items(), key=lambda kv: kv[1])
-            return [zing_swap_msg("buy", tid, q, None, txh)]
+            return [zing_swap_msg("buy", tid, q, None, txh, label)]
         return []
 
     # 4) sifet l chi wa7d
@@ -1082,7 +1085,7 @@ def zing_classify(tx, stake, pending):
         for v in to_people.values():
             _add(total, v)
         if total.get("", 0) >= 1 or _tokens(total):
-            lines = [f"\U0001F4E4 <b>{ZING_NAME} sifet {_fmt_assets(total)}</b>"]
+            lines = [f"\U0001F4E4 <b>{label} sifet {_fmt_assets(total)}</b>"]
             for a, v in sorted(to_people.items(), key=lambda kv: -kv[1].get("", 0))[:3]:
                 lines.append(f"\u27A1\ufe0f l: {addr_link(a)} ({_fmt_assets(v)})")
             lines.append(f'\U0001F517 <a href="https://cardanoscan.io/transaction/{txh}">Tx</a>')
@@ -1093,7 +1096,7 @@ def zing_classify(tx, stake, pending):
         if got.get("", 0) < 1:
             got.pop("", None)
         if got:
-            lines = [f"\U0001F4E5 <b>{ZING_NAME} jato {_fmt_assets(got)}</b>"]
+            lines = [f"\U0001F4E5 <b>{label} jato {_fmt_assets(got)}</b>"]
             for a in list(from_people)[:3]:
                 lines.append(f"\u2B05\ufe0f mn: {addr_link(a)}")
             lines.append(f'\U0001F517 <a href="https://cardanoscan.io/transaction/{txh}">Tx</a>')
@@ -1101,41 +1104,119 @@ def zing_classify(tx, stake, pending):
     return msgs
 
 
-def check_zing():
-    if not ZING_ADDR:
-        return
-    z = state.setdefault("zing", {"height": 0, "pending": []})
-    if not isinstance(z.get("pending"), list):
-        z["pending"] = []
-    if not _zing_stake[0]:
-        ai = koios("address_info", {"_addresses": [ZING_ADDR]})
-        _zing_stake[0] = (ai[0].get("stake_address") if ai else None) or ""
-    stake = _zing_stake[0]
+def zings():
+    """{smiya: {"addr","stake","height","pending"}} - wallets li kattab3."""
+    z = state.setdefault("zings", {})
+    if not state.get("zings_init"):
+        if not z and ZING_ADDR:
+            old = state.get("zing") or {}
+            z[ZING_NAME] = {"addr": ZING_ADDR, "stake": "", "height": old.get("height", 0),
+                            "pending": old.get("pending", [])}
+        state["zings_init"] = True
+    return z
+
+
+def resolve_stake(addr):
+    addr = (addr or "").strip()
+    if addr.startswith("stake1"):
+        return addr
+    if not addr.startswith("addr1"):
+        return ""
+    ai = koios("address_info", {"_addresses": [addr]})
+    if isinstance(ai, list) and ai:
+        return ai[0].get("stake_address") or ""
+    return ""
+
+
+def find_zing(key):
+    z = zings()
+    if not key:
+        return next(iter(z.items())) if len(z) == 1 else (None, None)
+    k = key.strip().lower()
+    for name, w in z.items():
+        if name.lower() == k or w["addr"].lower() == k or (w.get("stake") or "").lower() == k:
+            return name, w
+    for name, w in z.items():
+        if k in name.lower():
+            return name, w
+    return None, None
+
+
+def zing_add(addr, name):
+    addr = (addr or "").strip()
+    name = (name or "").strip()[:30] or f"{addr[:8]}…{addr[-4:]}"
+    stake = resolve_stake(addr)
     if not stake:
+        return "❌ Had l'adresse ma s7i7ach. Khassha tbda b <code>addr1</code> wla <code>stake1</code>."
+    z = zings()
+    for n, w in z.items():
+        if w.get("stake") == stake:
+            return f"⚠️ Had l'wallet deja kattab3o b smiya <b>{n}</b>."
+    if name in z:
+        return f"⚠️ Smiya <b>{name}</b> deja kayna. Khtar smiya khra."
+    if len(z) >= 25:
+        return "⚠️ Wslti l 25 wallet. 7ayd chi wa7d b /zing remove 9bel."
+    tip = koios_get("tip", {})
+    z[name] = {"addr": addr, "stake": stake, "height": tip[0].get("block_no", 0) if tip else 0, "pending": []}
+    save_state()
+    return (f"✅ Zedt <b>{name}</b> \U0001F433\n{addr_link(addr)}\n"
+            f"Ay buy, sell, sifet wla jato mn daba ghadi yban f #zing-wallet.")
+
+
+def zing_remove(key):
+    name, w = find_zing(key)
+    if not name:
+        return f"❌ Ma l9itch wallet b smiya <b>{key}</b>. Chouf /zing list."
+    zings().pop(name, None)
+    save_state()
+    return f"\U0001F5D1️ 7ayydt <b>{name}</b>. Ma b9itch ntab3o."
+
+
+def zing_list_text():
+    z = zings()
+    if not z:
+        return "Ma kattab3 7tta wallet. Zid wa7d b /zing add."
+    lines = [f"\U0001F433 <b>Wallets li kattab3 ({len(z)})</b>"]
+    for n, w in z.items():
+        lines.append(f"• <b>{n}</b>: {addr_link(w['addr'])}")
+    return "\n".join(lines)
+
+
+def check_zing():
+    z = zings()
+    if not z:
         return
-    if not z.get("height"):
-        tip = koios_get("tip", {})
-        if tip:
-            z["height"] = tip[0].get("block_no", 0)
-            print("Zing: bda mn block", z["height"])
-        return
-    txs = koios_get("account_txs", {"_stake_address": stake, "_after_block_height": z["height"] + 1})
-    if not isinstance(txs, list) or not txs:
-        return
-    txs = sorted(txs, key=lambda t: (t.get("block_height", 0), t.get("block_time", 0)))[:40]
-    info = koios("tx_info", {"_tx_hashes": [t["tx_hash"] for t in txs], "_inputs": True, "_assets": True})
-    by = {t["tx_hash"]: t for t in info or []}
-    for t in txs:
-        tx = by.get(t["tx_hash"])
-        if not tx:
+    tip = None
+    for name, w in list(z.items()):
+        if not isinstance(w.get("pending"), list):
+            w["pending"] = []
+        if not w.get("stake"):
+            w["stake"] = resolve_stake(w["addr"])
+            if not w["stake"]:
+                continue
+        if not w.get("height"):
+            tip = tip or koios_get("tip", {})
+            if tip:
+                w["height"] = tip[0].get("block_no", 0)
+                print(f"Zing {name}: bda mn block", w["height"])
             continue
-        try:
-            for m in zing_classify(tx, stake, z["pending"]):
-                zing_send(m)
-        except Exception as e:
-            print("Zing classify error:", e)
-        z["height"] = max(z["height"], t.get("block_height", 0))
-    z["pending"] = z["pending"][-60:]
+        txs = koios_get("account_txs", {"_stake_address": w["stake"], "_after_block_height": w["height"] + 1})
+        if not isinstance(txs, list) or not txs:
+            continue
+        txs = sorted(txs, key=lambda t: (t.get("block_height", 0), t.get("block_time", 0)))[:40]
+        info = koios("tx_info", {"_tx_hashes": [t["tx_hash"] for t in txs], "_inputs": True, "_assets": True})
+        by = {t["tx_hash"]: t for t in info or []}
+        for t in txs:
+            tx = by.get(t["tx_hash"])
+            if not tx:
+                continue
+            try:
+                for m in zing_classify(tx, w["stake"], w["pending"], name):
+                    zing_send(m)
+            except Exception as e:
+                print("Zing classify error:", e)
+            w["height"] = max(w["height"], t.get("block_height", 0))
+        w["pending"] = w["pending"][-60:]
 
 
 # =============== Discord bot (/zing, /price ...) ===============
@@ -1143,17 +1224,14 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "").strip()
 
 
-def _zing_stake_addr():
-    if not _zing_stake[0] and ZING_ADDR:
-        ai = koios("address_info", {"_addresses": [ZING_ADDR]})
-        _zing_stake[0] = (ai[0].get("stake_address") if ai else None) or ""
-    return _zing_stake[0]
-
-
-def zing_holdings_text():
-    stake = _zing_stake_addr()
+def zing_holdings_text(key=None):
+    label, w = find_zing(key)
+    if not label:
+        return (f"\u274C Ma l9itch wallet <b>{key}</b>. Chouf /zing list." if key
+                else "Khtar smiya dyal wallet (chouf /zing list).")
+    stake = w.get("stake") or resolve_stake(w["addr"])
     if not stake:
-        return "Ma kaynach adresse dyal Zing (ZING_ADDR)."
+        return "\u274C Ma 9dertch n9ra had l'wallet."
     acc = koios("account_info", {"_stake_addresses": [stake]})
     ada = (num(acc[0].get("total_balance")) or 0) / 1e6 if acc else 0
     rows = koios("account_assets", {"_stake_addresses": [stake]}) or []
@@ -1173,7 +1251,7 @@ def zing_holdings_text():
                 items.append((t, hold[t], v, i.get("mcap_ada"), i.get("h24")))
     items.sort(key=lambda x: -x[2])
     tok_val = sum(x[2] for x in items)
-    lines = [f"\U0001F433 <b>{ZING_NAME} wallet</b>",
+    lines = [f"\U0001F433 <b>{label} wallet</b>",
              f"\U0001F4B0 ADA: <b>{kfmt(ada)}</b>",
              f"\U0001F4BC Tokens: <b>{kfmt(tok_val)} ADA</b> · Total: <b>{kfmt(ada + tok_val)} ADA</b>", ""]
     for t, q, v, mc, h24 in items[:15]:
@@ -1186,10 +1264,14 @@ def zing_holdings_text():
     return "\n".join(lines)
 
 
-def zing_recent_text(n=10):
-    stake = _zing_stake_addr()
+def zing_recent_text(key=None, n=10):
+    label, w = find_zing(key)
+    if not label:
+        return (f"\u274C Ma l9itch wallet <b>{key}</b>. Chouf /zing list." if key
+                else "Khtar smiya dyal wallet (chouf /zing list).")
+    stake = w.get("stake") or resolve_stake(w["addr"])
     if not stake:
-        return "Ma kaynach adresse dyal Zing (ZING_ADDR)."
+        return "\u274C Ma 9dertch n9ra had l'wallet."
     tip = koios_get("tip", {})
     if not tip:
         return "Koios ma jawbch, 3awd mn b3d."
@@ -1206,7 +1288,7 @@ def zing_recent_text(n=10):
         if not tx:
             continue
         try:
-            msgs = zing_classify(tx, stake, pending)
+            msgs = zing_classify(tx, stake, pending, label)
         except Exception:
             msgs = []
         when = datetime.fromtimestamp(t.get("block_time", 0), TZ).strftime("%d/%m %H:%M")
@@ -1214,7 +1296,7 @@ def zing_recent_text(n=10):
             out.append(f"\U0001F552 {when}\n{m}")
     if not out:
         return "Ma kayn 7tta buy/sell/transfer f akhir Tx."
-    return f"\U0001F433 <b>Akhir {min(n, len(out))} Tx dyal {ZING_NAME}</b>\n\n" + "\n\n".join(reversed(out[-n:]))
+    return f"\U0001F433 <b>Akhir {min(n, len(out))} Tx dyal {label}</b>\n\n" + "\n\n".join(reversed(out[-n:]))
 
 
 def trending_text():
@@ -1257,8 +1339,11 @@ def whales_text():
 
 
 DISCORD_HELP = ("\U0001F916 <b>Commands</b>\n"
-                "/zing — ach 3nd Zing daba (tokens, qima, MCAP)\n"
-                "/zing_tx — akhir Tx dyal Zing (buy, sell, sifet, jato)\n"
+                "/zing add — zid wallet (adresse + smiya)\n"
+                "/zing list — wallets li kattab3\n"
+                "/zing remove — 7ayd wallet\n"
+                "/zing wallet — ach 3nd wallet daba\n"
+                "/zing tx — akhir Tx dyal wallet\n"
                 "/price SNEK — prix, MCAP, 1h/24h, chart\n"
                 "/trending — tokens li fihom volume daba\n"
                 "/whales — akbar buys w sells lyoum\n"
@@ -1304,14 +1389,40 @@ def start_discord_bot():
         for c in _chunks(html_to_md(text)):
             await inter.followup.send(c, suppress_embeds=True)
 
-    @tree.command(name="zing", description="Ach 3nd Zing daba (tokens, qima, MCAP)", guild=guild)
-    async def c_zing(inter: discord.Interaction):
-        await answer(inter, zing_holdings_text)
+    zing_group = app_commands.Group(name="zing", description="Tab3 wallets (whales)")
 
-    @tree.command(name="zing_tx", description="Akhir Tx dyal Zing (buy, sell, sifet, jato)", guild=guild)
-    @app_commands.describe(n="Ch7al mn Tx (1-20)")
-    async def c_zing_tx(inter: discord.Interaction, n: app_commands.Range[int, 1, 20] = 10):
-        await answer(inter, zing_recent_text, n)
+    async def wallet_names(inter: discord.Interaction, current: str):
+        cur = (current or "").lower()
+        return [app_commands.Choice(name=n, value=n) for n in list(zings()) if cur in n.lower()][:25]
+
+    @zing_group.command(name="add", description="Zid wallet bach ttab3o")
+    @app_commands.describe(adresse="Adresse (addr1... wla stake1...)", smiya="Smiya l had wallet (b7al Imad)")
+    async def z_add(inter: discord.Interaction, adresse: str, smiya: str):
+        await answer(inter, zing_add, adresse, smiya)
+
+    @zing_group.command(name="list", description="Lista dyal wallets li kattab3")
+    async def z_list(inter: discord.Interaction):
+        await answer(inter, zing_list_text)
+
+    @zing_group.command(name="remove", description="7ayd wallet mn lista")
+    @app_commands.describe(smiya="Smiya dyal wallet")
+    @app_commands.autocomplete(smiya=wallet_names)
+    async def z_remove(inter: discord.Interaction, smiya: str):
+        await answer(inter, zing_remove, smiya)
+
+    @zing_group.command(name="wallet", description="Ach 3nd wallet daba (tokens, qima, MCAP)")
+    @app_commands.describe(smiya="Smiya dyal wallet")
+    @app_commands.autocomplete(smiya=wallet_names)
+    async def z_wallet(inter: discord.Interaction, smiya: str):
+        await answer(inter, zing_holdings_text, smiya)
+
+    @zing_group.command(name="tx", description="Akhir Tx dyal wallet (buy, sell, sifet, jato)")
+    @app_commands.describe(smiya="Smiya dyal wallet", n="Ch7al mn Tx (1-20)")
+    @app_commands.autocomplete(smiya=wallet_names)
+    async def z_tx(inter: discord.Interaction, smiya: str, n: app_commands.Range[int, 1, 20] = 10):
+        await answer(inter, zing_recent_text, smiya, n)
+
+    tree.add_command(zing_group, guild=guild)
 
     @tree.command(name="price", description="Prix, MCAP, 1h/24h w chart dyal token", guild=guild)
     @app_commands.describe(token="Smiya (b7al SNEK) wla CA")
@@ -1387,7 +1498,7 @@ def main():
             except Exception as e:
                 print("Wallet error:", e)
             last_wallet = time.time()
-        if ZING_ADDR and time.time() - last_zing >= ZING_EVERY:
+        if time.time() - last_zing >= max(ZING_EVERY, 20 * len(state.get("zings") or {})):
             try:
                 check_zing()
             except Exception as e:
