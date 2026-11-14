@@ -1220,7 +1220,7 @@ def zing_fast():
     if not stakes:
         return
     if time.time() - _zaddr["t"] > 600 or sorted(_zaddr["stakes"]) != sorted(stakes):
-        rows = koios("account_addresses", {"_stake_addresses": list(stakes)})
+        rows = koios("account_addresses", {"_stake_addresses": list(stakes), "_empty": True})
         addrs = []
         for r in rows or []:
             addrs += r.get("addresses") or []
