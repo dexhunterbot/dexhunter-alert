@@ -46,6 +46,7 @@ jobs:
           DISCORD_SNEKFUN: ${{ secrets.DISCORD_SNEKFUN }}
           DISCORD_DGENS: ${{ secrets.DISCORD_DGENS }}
           DISCORD_SOLADA: ${{ secrets.DISCORD_SOLADA }}
+          KOIOS_TOKEN: ${{ secrets.KOIOS_TOKEN }}
           ZING_ADDR: ${{ secrets.ZING_ADDR }}
           ZING_NAME: "ZING"
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
