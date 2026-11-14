@@ -574,13 +574,30 @@ _stake = [None]
 _supply = {}
 
 
-def koios(path, body):
+KOIOS_TOKEN = os.environ.get("KOIOS_TOKEN", "").strip()
+_KH = {"Authorization": f"Bearer {KOIOS_TOKEN}"} if KOIOS_TOKEN else {}
+_kwait = [0.0, 0]
+
+
+def _koios_call(method, path, **kw):
+    if time.time() < _kwait[0]:
+        return []
     try:
-        r = S.post(f"{KOIOS}/{path}", json=body, timeout=30)
+        r = S.request(method, f"{KOIOS}/{path}", headers=_KH, timeout=30, **kw)
+        if r.status_code == 429:
+            _kwait[1] += 1
+            _kwait[0] = time.time() + min(300, 20 * _kwait[1])
+            print(f"Koios 429 (limit) - n7bes {min(300, 20 * _kwait[1])}s")
+            return []
+        _kwait[1] = 0
         return r.json() if r.ok else []
     except Exception as e:
         print("Koios error:", e)
         return []
+
+
+def koios(path, body):
+    return _koios_call("POST", path, json=body)
 
 
 def holdings():
@@ -927,12 +944,7 @@ def addr_link(addr):
 
 
 def koios_get(path, params):
-    try:
-        r = S.get(f"{KOIOS}/{path}", params=params, timeout=30)
-        return r.json() if r.ok else []
-    except Exception as e:
-        print("Koios error:", e)
-        return []
+    return _koios_call("GET", path, params=params)
 
 
 def _assets(u):
