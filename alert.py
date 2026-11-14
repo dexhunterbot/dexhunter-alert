@@ -7,6 +7,7 @@ DexHunter alert bot -> Telegram
 - Commands f Telegram: /price /wallet /min /entry /help
 - Résumé kol lil
 """
+import html
 import json
 import math
 import re
@@ -1433,6 +1434,84 @@ def start_discord_bot():
     threading.Thread(target=runner, daemon=True).start()
 
 
+
+# =============== snek.fun new launches ===============
+DISCORD_SNEKFUN = os.environ.get("DISCORD_SNEKFUN", "").strip()
+SNEKFUN_EVERY = int(os.environ.get("SNEKFUN_EVERY_SEC", "60"))
+
+
+def snek_send(text):
+    if not DISCORD_SNEKFUN:
+        print("SNEKFUN:", text[:200])
+        return
+    body = {"content": html_to_md(text)[:1990], "flags": 4, "allowed_mentions": {"parse": []}}
+    try:
+        r = S.post(DISCORD_SNEKFUN, json=body, timeout=20)
+        if r.status_code == 429:
+            time.sleep(min(float((r.json() or {}).get("retry_after", 2)), 10))
+            S.post(DISCORD_SNEKFUN, json=body, timeout=20)
+        elif not r.ok:
+            print("Discord snekfun error:", r.status_code, r.text[:200])
+    except Exception as e:
+        print("Discord snekfun exception:", e)
+
+
+def check_snekfun():
+    try:
+        r = S.get("https://analytics.snek.fun/v1/pools-main-page/initial/state?filter=Latest",
+                  headers={"Origin": "https://snek.fun", "Referer": "https://snek.fun/",
+                           "User-Agent": "Mozilla/5.0"}, timeout=20)
+        lst = r.json() if r.ok else None
+    except Exception as e:
+        print("Snekfun fetch error:", e)
+        return
+    if not isinstance(lst, list):
+        print("Snekfun: jawab ghalat", getattr(r, "status_code", "?"))
+        return
+    seen = state.setdefault("snek_seen", [])
+    first = not state.get("snek_init")
+    new = []
+    for p in lst:
+        info = p.get("info") or {}
+        pool = p.get("pool") or {}
+        asset = info.get("asset") or ""
+        if not asset or asset in seen:
+            continue
+        seen.append(asset)
+        new.append(p)
+    state["snek_seen"] = seen[-500:]
+    state["snek_init"] = True
+    if first:
+        print(f"Snekfun: bda, {len(new)} tokens deja kaynin (ma tsifet walo)")
+        return
+    new.sort(key=lambda p: (p.get("pool") or {}).get("createdOn") or 0)
+    for p in new[-10:]:
+        info, pool, m = p.get("info") or {}, p.get("pool") or {}, p.get("metrics") or {}
+        tid = info["asset"].replace(".", "")
+        tick = html.escape(str(info.get("ticker") or "?"))
+        desc = html.escape(str(info.get("description") or "").strip())[:200]
+        mcap = (num(m.get("marketCap")) or 0) / 1e6
+        vol = (num(m.get("totalVolumeAda")) or 0) / 1e6
+        cap = (num(pool.get("adaCapThreshold")) or 0) / 1e6
+        ts = pool.get("createdOn") or pool.get("timestamp")
+        when = datetime.fromtimestamp(ts, TZ).strftime("%d/%m %H:%M") if ts else ""
+        soc = info.get("socials") or {}
+        links = [f'<a href="https://snek.fun/token/{tid}">snek.fun</a>',
+                 f'<a href="https://app.dexhunter.io/swap?tokenIdSell=&tokenIdBuy={tid}">DexHunter</a>']
+        for k, lab in (("twitter", "X"), ("telegram", "Telegram"), ("discord", "Discord"), ("website", "Web")):
+            if soc.get(k):
+                links.append(f'<a href="{html.escape(soc[k])}">{lab}</a>')
+        lines = [f"\U0001F680 <b>NEW LAUNCH: ${tick}</b>" + (f" · {when}" if when else "")]
+        if desc:
+            lines.append(f"\U0001F4DD {desc}")
+        lines.append(f"\U0001F4B0 MCAP: <b>{kfmt(mcap)} ADA</b> · Vol: {kfmt(vol)} ADA"
+                     + (f" · Bonding: {kfmt(cap)} ADA" if cap else ""))
+        lines.append(f"\U0001F9FE CA: <code>{tid}</code>")
+        lines.append("\U0001F517 " + " · ".join(links))
+        snek_send("\n".join(lines))
+        print("Snekfun new:", info.get("ticker"))
+
+
 # =============== main ===============
 def main():
     if not (KEY and TG_TOKEN and TG_CHAT):
@@ -1453,6 +1532,7 @@ def main():
     total = checks = 0
     last_wallet = 0
     last_zing = 0
+    last_snek = 0
     while True:
         loop_start = time.time()
         try:
@@ -1475,6 +1555,12 @@ def main():
             except Exception as e:
                 print("Zing error:", e)
             last_zing = time.time()
+        if time.time() - last_snek >= SNEKFUN_EVERY:
+            try:
+                check_snekfun()
+            except Exception as e:
+                print("Snekfun error:", e)
+            last_snek = time.time()
         maybe_summary()
         if checks == 1:
             print(f"Check 1: {len(orders)} ordres, {a} alerte(s), wallet {len(state['wallet'])} tokens")
