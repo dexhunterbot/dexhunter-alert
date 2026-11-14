@@ -1363,6 +1363,34 @@ def _chunks(text, size=1900):
     return out
 
 
+ADA_PRICE_CHANNEL = os.environ.get("ADA_PRICE_CHANNEL", "").strip()
+ADA_RENAME_SEC = int(os.environ.get("ADA_RENAME_SEC", "310"))
+
+
+def ada_price():
+    """(prix USD, change 24h %) mn CoinGecko, w Kraken ila tla7."""
+    try:
+        r = S.get("https://api.coingecko.com/api/v3/simple/price",
+                  params={"ids": "cardano", "vs_currencies": "usd", "include_24hr_change": "true"}, timeout=15)
+        d = r.json()["cardano"]
+        return float(d["usd"]), float(d.get("usd_24h_change") or 0)
+    except Exception:
+        pass
+    try:
+        r = S.get("https://api.kraken.com/0/public/Ticker", params={"pair": "ADAUSD"}, timeout=15)
+        t = next(iter(r.json()["result"].values()))
+        last, opn = float(t["c"][0]), float(t["o"])
+        return last, (last / opn - 1) * 100 if opn else 0
+    except Exception as e:
+        print("ADA price error:", e)
+    return None, None
+
+
+def ada_label(price, ch):
+    dot = "\U0001F7E2" if ch >= 0 else "\U0001F534"
+    return f"{dot} ADA ${price:.4f} ({ch:+.2f}%)"
+
+
 def start_discord_bot():
     if not DISCORD_BOT_TOKEN:
         return
@@ -1417,6 +1445,28 @@ def start_discord_bot():
     async def c_trending(inter: discord.Interaction):
         await answer(inter, trending_text)
 
+    async def ada_ticker():
+        last_rename = 0
+        while True:
+            try:
+                price, ch = await asyncio.get_running_loop().run_in_executor(None, ada_price)
+                if price:
+                    label = ada_label(price, ch)
+                    await client.change_presence(activity=discord.Activity(
+                        type=discord.ActivityType.watching, name=label))
+                    if ADA_PRICE_CHANNEL and time.time() - last_rename >= ADA_RENAME_SEC:
+                        chan = client.get_channel(int(ADA_PRICE_CHANNEL)) or \
+                            await client.fetch_channel(int(ADA_PRICE_CHANNEL))
+                        if chan.name != label:
+                            await chan.edit(name=label)
+                        last_rename = time.time()
+            except Exception as e:
+                print("ADA ticker error:", e)
+                last_rename = time.time()
+            await asyncio.sleep(60)
+
+    started = [False]
+
     @client.event
     async def on_ready():
         try:
@@ -1424,6 +1474,9 @@ def start_discord_bot():
             print(f"Discord bot wajed: {client.user} ({len(synced)} commands)")
         except Exception as e:
             print("Discord sync error:", e)
+        if not started[0]:
+            started[0] = True
+            asyncio.get_running_loop().create_task(ada_ticker())
 
     def runner():
         try:
