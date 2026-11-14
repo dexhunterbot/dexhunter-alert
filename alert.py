@@ -1923,6 +1923,247 @@ def start_discord_bot():
 
 
 
+# =============== snek.fun rich launch card ===============
+_B32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+SNEK_H = {"Origin": "https://snek.fun", "Referer": "https://snek.fun/", "User-Agent": "Mozilla/5.0",
+          "Content-Type": "application/json"}
+
+
+def _b32_polymod(values):
+    gen = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+    chk = 1
+    for v in values:
+        b = chk >> 25
+        chk = (chk & 0x1ffffff) << 5 ^ v
+        for i in range(5):
+            chk ^= gen[i] if ((b >> i) & 1) else 0
+    return chk
+
+
+def _convertbits(data, frm, to, pad=True):
+    acc, bits, ret, maxv = 0, 0, [], (1 << to) - 1
+    for v in data:
+        acc = (acc << frm) | v
+        bits += frm
+        while bits >= to:
+            bits -= to
+            ret.append((acc >> bits) & maxv)
+    if pad and bits:
+        ret.append((acc << (to - bits)) & maxv)
+    return ret
+
+
+def b32_encode(hrp, data):
+    d = _convertbits(data, 8, 5)
+    hx = [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+    pm = _b32_polymod(hx + d + [0] * 6) ^ 1
+    return hrp + "1" + "".join(_B32[x] for x in d + [(pm >> 5 * (5 - i)) & 31 for i in range(6)])
+
+
+def b32_decode(s):
+    s = s.lower()
+    pos = s.rfind("1")
+    d = [_B32.find(c) for c in s[pos + 1:-6]]
+    return bytes(_convertbits(d, 5, 8, False))
+
+
+def addr_pkh(addr):
+    try:
+        return b32_decode(addr)[1:29].hex()
+    except Exception:
+        return ""
+
+
+def stake_from_skh(skh):
+    return b32_encode("stake", list(bytes.fromhex("e1" + skh)))
+
+
+def short_addr(a):
+    a = a or ""
+    return f"{a[5:11]}…{a[-5:]}" if a.startswith("addr1") else (a[:8] + "…" if a else "?")
+
+
+def snek_launched(pkh):
+    """Lista dyal tokens li lanca had pkh f snek.fun."""
+    if not pkh:
+        return []
+    try:
+        r = S.post("https://in-app-wallet.snek.fun/v1/user-account/profile/launched-assets",
+                   json={"pkhFundingWallet": [pkh]}, headers=SNEK_H, timeout=20)
+        return (r.json() or {}).get("assets") or [] if r.ok else []
+    except Exception as e:
+        print("Snek launched error:", e)
+        return []
+
+
+def snek_ath(asset):
+    """ATH dyal MCAP (ADA) mn charts dyal snek.fun."""
+    try:
+        r = S.get("https://charts.snek.fun/v1/charts/mcap/history",
+                  params={"base": asset, "quote": ".", "from": 1700000000, "to": int(time.time()), "resolution": "day1"},
+                  headers=SNEK_H, timeout=20)
+        bars = r.json() if r.ok else []
+        return max((b.get("high") or 0) for b in bars) / 1e6 if bars else 0
+    except Exception:
+        return 0
+
+
+def _ago(sec):
+    sec = max(0, sec)
+    if sec >= 365 * 86400:
+        return f"{sec / (365 * 86400):.1f} years"
+    if sec >= 30 * 86400:
+        return f"{sec / (30 * 86400):.0f} months"
+    if sec >= 86400:
+        return f"{sec / 86400:.0f} days"
+    if sec >= 3600:
+        return f"{sec / 3600:.0f} hours"
+    return f"{max(1, sec // 60):.0f} min"
+
+
+def _tickers(assets, skip=None, n=2):
+    t = [a.get("ticker") or "?" for a in assets if a.get("asset") != skip]
+    s = " ".join(f"`${x}`" for x in t[:n])
+    return s + (f" `+{len(t) - n}`" if len(t) > n else "")
+
+
+def snek_card(p):
+    """Discord embed dyal launch jdid f snek.fun (Token / Dev / Funder / Contract / Links)."""
+    info, pool, m = p.get("info") or {}, p.get("pool") or {}, p.get("metrics") or {}
+    asset = info.get("asset") or ""
+    tid = asset.replace(".", "")
+    tick = str(info.get("ticker") or "?")
+    created = pool.get("createdOn") or pool.get("timestamp") or int(time.time())
+    mcap = (num(m.get("marketCap")) or 0) / 1e6
+    cap = (num(pool.get("adaCapThreshold")) or 0) / 1e6
+    author = info.get("poolAuthor") or {}
+    pkh, skh = author.get("pkh") or "", author.get("skh") or ""
+    snek_url = f"https://snek.fun/token/{tid}"
+
+    # holders + dev address
+    holders, dev_addr = None, ""
+    try:
+        r = S.get("https://analytics.snek.fun/balances/v1/pool/holders", params={"assetId": asset},
+                  headers=SNEK_H, timeout=20)
+        if r.ok:
+            j = r.json()
+            holders = j.get("count")
+            dev_addr = (j.get("dev") or {}).get("address") or ""
+    except Exception:
+        pass
+    dev_stake = stake_from_skh(skh) if skh else ""
+
+    # dev buy (mn creation tx) + funder (mn awel tx dyal dev)
+    dev_buy, age, funder, f_sent, f_time = None, None, "", None, None
+    try:
+        hashes = []
+        create_tx = (info.get("outputId") or "").split(":")[0]
+        if create_tx:
+            hashes.append(create_tx)
+        first = koios_get("account_txs", {"_stake_address": dev_stake, "order": "block_height.asc", "limit": 1}) \
+            if dev_stake else []
+        if isinstance(first, list) and first:
+            age = created - (first[0].get("block_time") or created)
+            hashes.append(first[0]["tx_hash"])
+        txi = {t["tx_hash"]: t for t in (koios("tx_info", {"_tx_hashes": hashes, "_inputs": True, "_assets": True})
+                                         if hashes else []) or []}
+        ct = txi.get(create_tx)
+        if ct:
+            for o in ct.get("outputs") or []:
+                if any(a.get("asset_name") == asset.split(".")[-1] and a.get("policy_id") == asset.split(".")[0]
+                       for a in o.get("asset_list") or []) and o.get("stake_addr") != dev_stake:
+                    v = (num(o.get("value")) or 0) / 1e6 - 3
+                    dev_buy = max(dev_buy or 0, v)
+        if isinstance(first, list) and first:
+            ft = txi.get(first[0]["tx_hash"])
+            if ft:
+                ins = [u for u in ft.get("inputs") or [] if u.get("stake_addr") != dev_stake]
+                if ins:
+                    funder = ins[0]["payment_addr"]["bech32"]
+                    f_sent = sum((num(o.get("value")) or 0) for o in ft.get("outputs") or []
+                                 if o.get("stake_addr") == dev_stake) / 1e6
+                    f_time = created - (ft.get("tx_timestamp") or created)
+    except Exception as e:
+        print("Snek card koios error:", e)
+
+    # launches dyal dev w funder
+    dev_l = snek_launched(pkh)
+    prev = [a for a in dev_l if a.get("asset") != asset]
+    best_t, best_mc = None, 0
+    for a in prev[:12]:
+        ath = snek_ath(a.get("asset"))
+        if ath > best_mc:
+            best_t, best_mc = a.get("ticker"), ath
+    f_pkh = addr_pkh(funder) if funder else ""
+    fund_l = snek_launched(f_pkh) if f_pkh and f_pkh != pkh else []
+
+    cs = lambda a: f"https://cardanoscan.io/address/{a}"
+    tok = [f"\U0001F4A7 MC `{kfmt(mcap)} ₳`",
+           f"\U0001F465 Holders `{holders if holders is not None else '–'}`",
+           f"\U0001F4BB Dev buy `{kfmt(dev_buy)} ₳`" if dev_buy and dev_buy > 0.5 else "\U0001F4BB Dev buy `–`",
+           f"\U0001F4C8 Bonding `{min(100, (dev_buy or 0) / cap * 100):.0f}%`" if cap else "\U0001F4C8 Bonding `–`"]
+    dev = [f"\U0001F464 Wallet [`{short_addr(dev_addr)}`]({cs(dev_addr)})" if dev_addr else "\U0001F464 Wallet `?`",
+           f"⏳ Wallet age `{_ago(age)}`" if age is not None else "⏳ Wallet age `new`",
+           (f"\U0001F680 Launches `{len(prev)}` " + _tickers(prev)) if prev else "\U0001F680 Launches `0` · first launch"]
+    if best_t:
+        dev.append(f"\U0001F3C6 Best `{kfmt(best_mc)} ₳ MC` on `${best_t}`")
+    fund = []
+    if funder:
+        fund = [f"\U0001F3E6 Wallet [`{short_addr(funder)}`]({cs(funder)})"]
+        if f_sent:
+            fund.append(f"\U0001F4B8 Sent `{kfmt(f_sent)} ₳` {_ago(f_time)} before launch")
+        fund.append((f"⚠️ Launches `{len(fund_l)}` " + _tickers(fund_l)) if fund_l else "✅ Launches `0`")
+    soc = info.get("socials") or {}
+    links = [f"[Trade on DexHunter](https://app.dexhunter.io/swap?tokenIdSell=&tokenIdBuy={tid})",
+             f"[snek.fun]({snek_url})"]
+    for k, lab in (("twitter", "X"), ("telegram", "Telegram"), ("discord", "Discord"), ("website", "Web")):
+        if soc.get(k):
+            links.append(f"[{lab}]({soc[k]})")
+    desc = str(info.get("description") or "").strip()[:200]
+    logo = info.get("logoCID")
+    emb = {
+        "author": {"name": "New coin on snek.fun · Cardano"},
+        "title": f"${tick}",
+        "url": snek_url,
+        "color": 0xF5A623,
+        "fields": [{"name": "Token", "value": "\n".join(tok)},
+                   {"name": "Dev", "value": "\n".join(dev)}]
+                  + ([{"name": "Funder", "value": "\n".join(fund)}] if fund else [])
+                  + [{"name": "Contract", "value": f"```{tid}```"},
+                     {"name": "Links", "value": " · ".join(links)}],
+        "footer": {"text": "Notif DEX launch alert · not financial advice"},
+        "timestamp": datetime.fromtimestamp(created, timezone.utc).isoformat(),
+    }
+    if desc:
+        emb["description"] = desc
+    if logo:
+        emb["thumbnail"] = {"url": f"https://ipfs.io/ipfs/{logo}"}
+        emb["author"]["icon_url"] = f"https://ipfs.io/ipfs/{logo}"
+    return emb
+
+
+def post_embed(chan_id, embed, webhook=None):
+    body = {"embeds": [embed], "allowed_mentions": {"parse": []}}
+    try:
+        if webhook:
+            r = S.post(webhook, json=body, timeout=20)
+        elif DISCORD_BOT_TOKEN and chan_id:
+            r = S.post(f"https://discord.com/api/v10/channels/{chan_id}/messages", json=body,
+                       headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=20)
+        else:
+            print("EMBED:", embed.get("title"))
+            return
+        if r.status_code == 429:
+            time.sleep(min(float((r.json() or {}).get("retry_after", 2)), 10))
+            r = (S.post(webhook, json=body, timeout=20) if webhook else
+                 S.post(f"https://discord.com/api/v10/channels/{chan_id}/messages", json=body,
+                        headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=20))
+        if not r.ok:
+            print("Embed post error:", r.status_code, r.text[:300])
+    except Exception as e:
+        print("Embed post exception:", e)
+
+
 # =============== snek.fun new launches ===============
 DISCORD_SNEKFUN = os.environ.get("DISCORD_SNEKFUN", "").strip()
 SNEKFUN_EVERY = int(os.environ.get("SNEKFUN_EVERY_SEC", "60"))
@@ -1958,8 +2199,8 @@ def check_snekfun():
         return
     seen = state.setdefault("snek_seen", [])
     first = not state.get("snek_init")
-    if not first and not state.get("snek_bf"):  # mra wa7da: nsifto akhir 3 launches bach tban l channel khddama
-        state["snek_bf"] = True
+    if not first and not state.get("snek_bf2"):  # mra wa7da: nsifto akhir 3 launches bach tban l channel khddama
+        state["snek_bf2"] = True
         newest = sorted(lst, key=lambda p: (p.get("pool") or {}).get("createdOn") or 0)[-3:]
         drop = {(p.get("info") or {}).get("asset") for p in newest}
         seen[:] = [a for a in seen if a not in drop]
@@ -1979,30 +2220,13 @@ def check_snekfun():
         return
     new.sort(key=lambda p: (p.get("pool") or {}).get("createdOn") or 0)
     for p in new[-10:]:
-        info, pool, m = p.get("info") or {}, p.get("pool") or {}, p.get("metrics") or {}
-        tid = info["asset"].replace(".", "")
-        tick = html.escape(str(info.get("ticker") or "?"))
-        desc = html.escape(str(info.get("description") or "").strip())[:200]
-        mcap = (num(m.get("marketCap")) or 0) / 1e6
-        vol = (num(m.get("totalVolumeAda")) or 0) / 1e6
-        cap = (num(pool.get("adaCapThreshold")) or 0) / 1e6
-        ts = pool.get("createdOn") or pool.get("timestamp")
-        when = datetime.fromtimestamp(ts, TZ).strftime("%d/%m %H:%M") if ts else ""
-        soc = info.get("socials") or {}
-        links = [f'<a href="https://snek.fun/token/{tid}">snek.fun</a>',
-                 f'<a href="https://app.dexhunter.io/swap?tokenIdSell=&tokenIdBuy={tid}">DexHunter</a>']
-        for k, lab in (("twitter", "X"), ("telegram", "Telegram"), ("discord", "Discord"), ("website", "Web")):
-            if soc.get(k):
-                links.append(f'<a href="{html.escape(soc[k])}">{lab}</a>')
-        lines = [f"\U0001F680 <b>NEW LAUNCH: ${tick}</b>" + (f" · {when}" if when else "")]
-        if desc:
-            lines.append(f"\U0001F4DD {desc}")
-        lines.append(f"\U0001F4B0 MCAP: <b>{kfmt(mcap)} ADA</b> · Vol: {kfmt(vol)} ADA"
-                     + (f" · Bonding: {kfmt(cap)} ADA" if cap else ""))
-        lines.append(f"\U0001F9FE CA: <code>{tid}</code>")
-        lines.append("\U0001F517 " + " · ".join(links))
-        snek_send("\n".join(lines))
-        print("Snekfun new:", info.get("ticker"))
+        try:
+            emb = snek_card(p)
+        except Exception as e:
+            print("Snek card error:", e)
+            continue
+        post_embed(os.environ.get("SNEKFUN_CHANNEL", "").strip(), emb, DISCORD_SNEKFUN or None)
+        print("Snekfun new:", (p.get("info") or {}).get("ticker"))
 
 
 # =============== dgens.fun + solada.fun new launches ===============
