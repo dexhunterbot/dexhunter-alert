@@ -1364,31 +1364,42 @@ def _chunks(text, size=1900):
 
 
 ADA_PRICE_CHANNEL = os.environ.get("ADA_PRICE_CHANNEL", "").strip()
+BTC_PRICE_CHANNEL = os.environ.get("BTC_PRICE_CHANNEL", "").strip()
+ETH_PRICE_CHANNEL = os.environ.get("ETH_PRICE_CHANNEL", "").strip()
 ADA_RENAME_SEC = int(os.environ.get("ADA_RENAME_SEC", "310"))
+COINS = [("cardano", "ADA", "ADAUSD", 4), ("bitcoin", "BTC", "XBTUSD", 0), ("ethereum", "ETH", "ETHUSD", 2)]
 
 
-def ada_price():
-    """(prix USD, change 24h %) mn CoinGecko, w Kraken ila tla7."""
+def coin_prices():
+    """{SYM: (prix USD, change 24h %)} mn CoinGecko, w Kraken ila tla7."""
+    out = {}
     try:
         r = S.get("https://api.coingecko.com/api/v3/simple/price",
-                  params={"ids": "cardano", "vs_currencies": "usd", "include_24hr_change": "true"}, timeout=15)
-        d = r.json()["cardano"]
-        return float(d["usd"]), float(d.get("usd_24h_change") or 0)
+                  params={"ids": ",".join(c[0] for c in COINS), "vs_currencies": "usd",
+                          "include_24hr_change": "true"}, timeout=15)
+        d = r.json()
+        for cid, sym, _, _ in COINS:
+            if cid in d and d[cid].get("usd"):
+                out[sym] = (float(d[cid]["usd"]), float(d[cid].get("usd_24h_change") or 0))
     except Exception:
         pass
-    try:
-        r = S.get("https://api.kraken.com/0/public/Ticker", params={"pair": "ADAUSD"}, timeout=15)
-        t = next(iter(r.json()["result"].values()))
-        last, opn = float(t["c"][0]), float(t["o"])
-        return last, (last / opn - 1) * 100 if opn else 0
-    except Exception as e:
-        print("ADA price error:", e)
-    return None, None
+    for cid, sym, pair, _ in COINS:
+        if sym in out:
+            continue
+        try:
+            r = S.get("https://api.kraken.com/0/public/Ticker", params={"pair": pair}, timeout=15)
+            t = next(iter(r.json()["result"].values()))
+            last, opn = float(t["c"][0]), float(t["o"])
+            out[sym] = (last, (last / opn - 1) * 100 if opn else 0)
+        except Exception as e:
+            print(f"{sym} price error:", e)
+    return out
 
 
-def ada_label(price, ch):
+def coin_label(sym, price, ch):
+    dec = next((c[3] for c in COINS if c[1] == sym), 2)
     dot = "\U0001F7E2" if ch >= 0 else "\U0001F534"
-    return f"{dot} ADA ${price:.4f} ({ch:+.2f}%)"
+    return f"{dot} {sym} ${price:,.{dec}f} ({ch:+.2f}%)"
 
 
 def start_discord_bot():
@@ -1446,23 +1457,27 @@ def start_discord_bot():
         await answer(inter, trending_text)
 
     async def ada_ticker():
-        last_rename = 0
+        chans = {"ADA": ADA_PRICE_CHANNEL, "BTC": BTC_PRICE_CHANNEL, "ETH": ETH_PRICE_CHANNEL}
+        last_rename = {}
         while True:
             try:
-                price, ch = await asyncio.get_running_loop().run_in_executor(None, ada_price)
-                if price:
-                    label = ada_label(price, ch)
+                px = await asyncio.get_running_loop().run_in_executor(None, coin_prices)
+                if "ADA" in px:
                     await client.change_presence(activity=discord.Activity(
-                        type=discord.ActivityType.watching, name=label))
-                    if ADA_PRICE_CHANNEL and time.time() - last_rename >= ADA_RENAME_SEC:
-                        chan = client.get_channel(int(ADA_PRICE_CHANNEL)) or \
-                            await client.fetch_channel(int(ADA_PRICE_CHANNEL))
+                        type=discord.ActivityType.watching, name=coin_label("ADA", *px["ADA"])))
+                for sym, cid in chans.items():
+                    if not cid or sym not in px or time.time() - last_rename.get(sym, 0) < ADA_RENAME_SEC:
+                        continue
+                    last_rename[sym] = time.time()
+                    try:
+                        label = coin_label(sym, *px[sym])
+                        chan = client.get_channel(int(cid)) or await client.fetch_channel(int(cid))
                         if chan.name != label:
                             await chan.edit(name=label)
-                        last_rename = time.time()
+                    except Exception as e:
+                        print(f"{sym} ticker error:", e)
             except Exception as e:
-                print("ADA ticker error:", e)
-                last_rename = time.time()
+                print("Price ticker error:", e)
             await asyncio.sleep(60)
 
     started = [False]
