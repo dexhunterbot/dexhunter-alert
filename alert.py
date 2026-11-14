@@ -9,6 +9,7 @@ DexHunter alert bot -> Telegram
 """
 import json
 import math
+import re
 import os
 import sys
 import time
@@ -30,6 +31,7 @@ KEY = os.environ.get("DEXHUNTER_KEY", "").strip()
 TG_TOKEN = os.environ.get("TG_TOKEN", "").strip()
 TG_CHAT = os.environ.get("TG_CHAT_ID", "").strip()
 WALLET = os.environ.get("WALLET_ADDR", "").strip()
+DISCORD = os.environ.get("DISCORD_WEBHOOK", "").strip()
 MIN_ADA = float(os.environ.get("MIN_ADA", "10000"))
 POLL_SEC = int(os.environ.get("POLL_SEC", "30"))
 RUN_MINUTES = int(os.environ.get("RUN_MINUTES", "0"))
@@ -119,7 +121,35 @@ def now_local():
 
 
 # =============== telegram ===============
-def tg(text, chat=None):
+def html_to_md(text):
+    t = re.sub(r'<a href="([^"]+)">([^<]+)</a>', r"[\2](<\1>)", text)
+    t = re.sub(r"</?b>", "**", t)
+    t = re.sub(r"</?i>", "*", t)
+    t = re.sub(r"</?code>", "`", t)
+    return t.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+
+
+def discord(text):
+    if not DISCORD:
+        return
+    for _ in range(2):
+        try:
+            r = S.post(DISCORD, json={"content": html_to_md(text)[:1990], "flags": 4,
+                                      "allowed_mentions": {"parse": []}}, timeout=20)
+            if r.status_code == 429:
+                time.sleep(min(float((r.json() or {}).get("retry_after", 2)), 10))
+                continue
+            if not r.ok:
+                print("Discord error:", r.status_code, r.text[:200])
+            return
+        except Exception as e:
+            print("Discord exception:", e)
+            return
+
+
+def tg(text, chat=None, mirror=True):
+    if mirror:
+        discord(text)
     try:
         r = S.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                    json={"chat_id": chat or TG_CHAT, "text": text, "parse_mode": "HTML",
@@ -771,7 +801,7 @@ def poll_commands(wait):
             except Exception as e:
                 ans = f"Wa9e3 chi mochkil: {e}"
             if ans:
-                tg(ans)
+                tg(ans, mirror=False)
         if ups:
             save_state()
 
