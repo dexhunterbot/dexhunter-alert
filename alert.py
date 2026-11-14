@@ -880,6 +880,264 @@ def maybe_summary():
         save_state()
 
 
+# =============== zing wallet (copy-trading) ===============
+ZING_ADDR = os.environ.get("ZING_ADDR", "").strip()
+ZING_NAME = os.environ.get("ZING_NAME", "ZING").strip() or "ZING"
+DISCORD_ZING = os.environ.get("DISCORD_ZING", "").strip()
+ZING_EVERY = int(os.environ.get("ZING_EVERY_SEC", "60"))
+_zing_stake = [None]
+
+
+def zing_send(text):
+    if DISCORD_ZING:
+        try:
+            r = S.post(DISCORD_ZING, json={"content": html_to_md(text)[:1990], "flags": 4,
+                                           "allowed_mentions": {"parse": []}}, timeout=20)
+            if r.status_code == 429:
+                time.sleep(min(float((r.json() or {}).get("retry_after", 2)), 10))
+                S.post(DISCORD_ZING, json={"content": html_to_md(text)[:1990], "flags": 4,
+                                           "allowed_mentions": {"parse": []}}, timeout=20)
+            elif not r.ok:
+                print("Discord zing error:", r.status_code, r.text[:200])
+        except Exception as e:
+            print("Discord zing exception:", e)
+    else:
+        print("ZING:", text[:200])
+
+
+def is_script(addr):
+    # addr1z / addr1x / addr1w = smart contract (DEX, orders...)
+    return len(addr) > 5 and addr[5] in "zxw"
+
+
+def short(addr):
+    return f"{addr[:10]}…{addr[-6:]}"
+
+
+def addr_link(addr):
+    return f'<a href="https://cardanoscan.io/address/{addr}">{short(addr)}</a>'
+
+
+def koios_get(path, params):
+    try:
+        r = S.get(f"{KOIOS}/{path}", params=params, timeout=30)
+        return r.json() if r.ok else []
+    except Exception as e:
+        print("Koios error:", e)
+        return []
+
+
+def _assets(u):
+    """{tid: qty (b decimals)} + ADA."""
+    out = {"": (num(u.get("value")) or 0) / 1e6}
+    for a in u.get("asset_list") or []:
+        tid = (a.get("policy_id") or "") + (a.get("asset_name") or "")
+        q = (num(a.get("quantity")) or 0) / (10 ** int(a.get("decimals") or 0))
+        out[tid] = out.get(tid, 0) + q
+    return out
+
+
+def _add(d, other, sign=1):
+    for k, v in other.items():
+        d[k] = d.get(k, 0) + sign * v
+
+
+def _clean(d, ada_eps=1.0):
+    return {k: v for k, v in d.items() if (abs(v) > ada_eps if k == "" else abs(v) > 0)}
+
+
+def zing_tx_view(tx, stake):
+    """net (dyal wallet), sent{addr:assets}, recv{addr:assets}"""
+    net, sent, recv = {}, {}, {}
+    for u in tx.get("inputs") or []:
+        a = _assets(u)
+        if u.get("stake_addr") == stake:
+            _add(net, a, -1)
+        else:
+            _add(recv.setdefault(u["payment_addr"]["bech32"], {}), a)
+    for u in tx.get("outputs") or []:
+        a = _assets(u)
+        if u.get("stake_addr") == stake:
+            _add(net, a, 1)
+        else:
+            _add(sent.setdefault(u["payment_addr"]["bech32"], {}), a)
+    return net, sent, recv
+
+
+def _tokens(d):
+    return {k: v for k, v in d.items() if k and abs(v) > 0}
+
+
+def zing_swap_msg(kind, tid, qty, ada, txh):
+    name = token_name(tid)
+    info = dex1(tid)
+    price = ada / qty if qty and ada else None
+    icon = "\U0001F7E2" if kind == "buy" else "\U0001F534"
+    lines = [f"\U0001F433 <b>{ZING_NAME} {icon} {'BUY' if kind == 'buy' else 'SELL'} {name}"
+             + (f" {kfmt(ada)} ADA" if ada else "") + "</b>",
+             f"\U0001F4E6 {kfmt(qty)} {name}" + (f" · \U0001F4B0 {pfmt(price)} ADA" if price else "")]
+    if info and info.get("mcap_ada"):
+        lines.append(f"\U0001F4CA MCAP: {kfmt(info['mcap_ada'])} ADA")
+    lines.append("\U0001F517 " + links(tid, info, txh))
+    return "\n".join(lines)
+
+
+def _fmt_assets(d):
+    parts = []
+    if d.get("", 0) > 0.5:
+        parts.append(f"{kfmt(d[''])} ADA")
+    for k, v in d.items():
+        if k and v > 0:
+            parts.append(f"{kfmt(v)} {token_name(k)}")
+    return " + ".join(parts) or "?"
+
+
+def _order_utxos(tx, stake):
+    """Inputs mn script (machi dyal wallet) li homa orders: ADA bo7do, wla token wa7d + ADA sghir."""
+    out = []
+    for u in tx.get("inputs") or []:
+        ad = u["payment_addr"]["bech32"]
+        if u.get("stake_addr") == stake or not is_script(ad):
+            continue
+        a = _assets(u)
+        t = {k: v for k, v in a.items() if k and v > 0}
+        if not t and a.get("", 0) > 3:
+            out.append({"addr": ad, "assets": a})
+        elif len(t) == 1 and a.get("", 0) < 10:
+            out.append({"addr": ad, "assets": a})
+    return out
+
+
+def zing_classify(tx, stake, pending):
+    """Kayrj3 lista dyal messages. pending = orders li sifethom l DEX w mazal ma t3mmrouch."""
+    txh = tx["tx_hash"]
+    net, sent, recv = zing_tx_view(tx, stake)
+    toks = _tokens(net)
+    ada = net.get("", 0)
+    to_scripts = {a: v for a, v in sent.items() if is_script(a)}
+    to_people = {a: v for a, v in sent.items() if not is_script(a)}
+    from_scripts = {a: v for a, v in recv.items() if is_script(a)}
+    from_people = {a: v for a, v in recv.items() if not is_script(a)}
+    msgs = []
+    wallet_in = any(u.get("stake_addr") == stake for u in tx.get("inputs") or [])
+    if not wallet_in:
+        to_scripts, to_people = {}, {}  # Tx dyal chi wa7d akhor: dakchi li tsifet machi mn 3ndo
+
+    # 1) swap f nafs Tx (direct, wla order f script dyalo 3amar)
+    if len(toks) == 1 and abs(ada) > 2:
+        tid, q = next(iter(toks.items()))
+        if q > 0 and ada < 0:
+            return [zing_swap_msg("buy", tid, q, -ada, txh)]
+        if q < 0 and ada > 0:
+            return [zing_swap_msg("sell", tid, -q, ada, txh)]
+
+    # 2) order jdid l DEX: nkhbbiwh 7tta y3mmer
+    if to_scripts and ada <= 0:
+        for u in tx.get("outputs") or []:
+            ad = u["payment_addr"]["bech32"]
+            if ad in to_scripts and u.get("stake_addr") != stake:
+                a = _assets(u)
+                t = {k: v for k, v in a.items() if k and v > 0}
+                if (not t and a.get("", 0) > 3) or (len(t) == 1 and a.get("", 0) < 10):
+                    pending.append({"addr": ad, "assets": a})
+        # transfers sghar m3a order (fees dyal batcher) ma kanbaynouhomch
+        to_people = {a: v for a, v in to_people.items() if v.get("", 0) >= 20 or _tokens(v)}
+
+    # 3) order t3mmer (fill): wallet kayjih chi 7aja mn script
+    if not wallet_in and from_scripts and (ada > 0.5 or any(v > 0 for v in toks.values())):
+        order = None
+        for i, p in enumerate(pending):
+            if p["addr"] in from_scripts:
+                order = pending.pop(i)["assets"]
+                break
+        if order is None:
+            cands = _order_utxos(tx, stake)
+            if len(cands) == 1:
+                order = cands[0]["assets"]
+        got_t = {k: v for k, v in toks.items() if v > 0}
+        if order is not None:
+            o_t = {k: v for k, v in order.items() if k and v > 0}
+            o_ada = order.get("", 0)
+            if got_t and not o_t:
+                tid, q = max(got_t.items(), key=lambda kv: kv[1])
+                spent = o_ada - max(ada, 0)
+                if spent > 2:
+                    return [zing_swap_msg("buy", tid, q, spent, txh)]
+                return []
+            if o_t and ada > 0 and not got_t:
+                tid, q = next(iter(o_t.items()))
+                gotada = ada - o_ada
+                if gotada > 1:
+                    return [zing_swap_msg("sell", tid, q, gotada, txh)]
+                return []
+            return []
+        if got_t:
+            tid, q = max(got_t.items(), key=lambda kv: kv[1])
+            return [zing_swap_msg("buy", tid, q, None, txh)]
+        return []
+
+    # 4) sifet l chi wa7d
+    if to_people:
+        total = {}
+        for v in to_people.values():
+            _add(total, v)
+        if total.get("", 0) >= 1 or _tokens(total):
+            lines = [f"\U0001F4E4 <b>{ZING_NAME} sifet {_fmt_assets(total)}</b>"]
+            for a, v in sorted(to_people.items(), key=lambda kv: -kv[1].get("", 0))[:3]:
+                lines.append(f"\u27A1\ufe0f l: {addr_link(a)} ({_fmt_assets(v)})")
+            lines.append(f'\U0001F517 <a href="https://cardanoscan.io/transaction/{txh}">Tx</a>')
+            msgs.append("\n".join(lines))
+    # 5) jato mn chi wa7d
+    elif from_people and not wallet_in:
+        got = {k: v for k, v in net.items() if v > 0}
+        if got.get("", 0) < 1:
+            got.pop("", None)
+        if got:
+            lines = [f"\U0001F4E5 <b>{ZING_NAME} jato {_fmt_assets(got)}</b>"]
+            for a in list(from_people)[:3]:
+                lines.append(f"\u2B05\ufe0f mn: {addr_link(a)}")
+            lines.append(f'\U0001F517 <a href="https://cardanoscan.io/transaction/{txh}">Tx</a>')
+            msgs.append("\n".join(lines))
+    return msgs
+
+
+def check_zing():
+    if not ZING_ADDR:
+        return
+    z = state.setdefault("zing", {"height": 0, "pending": []})
+    if not isinstance(z.get("pending"), list):
+        z["pending"] = []
+    if not _zing_stake[0]:
+        ai = koios("address_info", {"_addresses": [ZING_ADDR]})
+        _zing_stake[0] = (ai[0].get("stake_address") if ai else None) or ""
+    stake = _zing_stake[0]
+    if not stake:
+        return
+    if not z.get("height"):
+        tip = koios_get("tip", {})
+        if tip:
+            z["height"] = tip[0].get("block_no", 0)
+            print("Zing: bda mn block", z["height"])
+        return
+    txs = koios_get("account_txs", {"_stake_address": stake, "_after_block_height": z["height"] + 1})
+    if not isinstance(txs, list) or not txs:
+        return
+    txs = sorted(txs, key=lambda t: (t.get("block_height", 0), t.get("block_time", 0)))[:40]
+    info = koios("tx_info", {"_tx_hashes": [t["tx_hash"] for t in txs], "_inputs": True, "_assets": True})
+    by = {t["tx_hash"]: t for t in info or []}
+    for t in txs:
+        tx = by.get(t["tx_hash"])
+        if not tx:
+            continue
+        try:
+            for m in zing_classify(tx, stake, z["pending"]):
+                zing_send(m)
+        except Exception as e:
+            print("Zing classify error:", e)
+        z["height"] = max(z["height"], t.get("block_height", 0))
+    z["pending"] = z["pending"][-60:]
+
+
 # =============== main ===============
 def main():
     if not (KEY and TG_TOKEN and TG_CHAT):
@@ -898,6 +1156,7 @@ def main():
     end = start + RUN_MINUTES * 60
     total = checks = 0
     last_wallet = 0
+    last_zing = 0
     while True:
         loop_start = time.time()
         try:
@@ -914,6 +1173,12 @@ def main():
             except Exception as e:
                 print("Wallet error:", e)
             last_wallet = time.time()
+        if ZING_ADDR and time.time() - last_zing >= ZING_EVERY:
+            try:
+                check_zing()
+            except Exception as e:
+                print("Zing error:", e)
+            last_zing = time.time()
         maybe_summary()
         if checks == 1:
             print(f"Check 1: {len(orders)} ordres, {a} alerte(s), wallet {len(state['wallet'])} tokens")
