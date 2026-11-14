@@ -1512,6 +1512,117 @@ def check_snekfun():
         print("Snekfun new:", info.get("ticker"))
 
 
+# =============== dgens.fun + solada.fun new launches ===============
+DISCORD_DGENS = os.environ.get("DISCORD_DGENS", "").strip()
+DISCORD_SOLADA = os.environ.get("DISCORD_SOLADA", "").strip()
+LAUNCH_EVERY = int(os.environ.get("LAUNCH_EVERY_SEC", "60"))
+BROWSER_H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/130.0 Safari/537.36", "Accept": "application/json"}
+
+
+def hook_send(url, text, tag):
+    if not url:
+        print(f"{tag}:", text[:200])
+        return
+    body = {"content": html_to_md(text)[:1990], "flags": 4, "allowed_mentions": {"parse": []}}
+    try:
+        r = S.post(url, json=body, timeout=20)
+        if r.status_code == 429:
+            time.sleep(min(float((r.json() or {}).get("retry_after", 2)), 10))
+            S.post(url, json=body, timeout=20)
+        elif not r.ok:
+            print(f"Discord {tag} error:", r.status_code, r.text[:200])
+    except Exception as e:
+        print(f"Discord {tag} exception:", e)
+
+
+def _new_launches(key, items, ident, created):
+    """Kayrj3 ghir tokens jdad (ma tsifet walo f awel merra)."""
+    seen = state.setdefault(key + "_seen", [])
+    first = not state.get(key + "_init")
+    new = []
+    for c in items:
+        i = ident(c)
+        if not i or i in seen:
+            continue
+        seen.append(i)
+        new.append(c)
+    state[key + "_seen"] = seen[-1500:]
+    state[key + "_init"] = True
+    if first:
+        print(f"{key}: bda, {len(new)} tokens deja kaynin (ma tsifet walo)")
+        return []
+    return sorted(new, key=created)[-10:]
+
+
+def _when(ms):
+    return datetime.fromtimestamp(ms / 1000, TZ).strftime("%d/%m %H:%M") if ms else ""
+
+
+def _launch_msg(tick, name, when, desc, mcap, extra, ca, links):
+    tick = html.escape(str(tick or "?"))
+    name = html.escape(str(name or ""))
+    head = f"\U0001F680 <b>NEW LAUNCH: ${tick}</b>" + (f" ({name})" if name and name.upper() != tick.upper() else "")
+    lines = [head + (f" · {when}" if when else "")]
+    desc = html.escape(str(desc or "").strip())[:200]
+    if desc:
+        lines.append(f"\U0001F4DD {desc}")
+    lines.append(f"\U0001F4B0 MCAP: <b>{kfmt(mcap)} ADA</b>" + (f" · {extra}" if extra else ""))
+    if ca:
+        lines.append(f"\U0001F9FE CA: <code>{ca}</code>")
+    lines.append("\U0001F517 " + " · ".join(links))
+    return "\n".join(lines)
+
+
+def check_dgens():
+    try:
+        r = S.get("https://dgens.fun/api/coins?chain=cardano&sort=new&limit=50&offset=0",
+                  headers=BROWSER_H, timeout=20)
+        coins = (r.json() or {}).get("coins") if r.ok else None
+    except Exception as e:
+        print("Dgens fetch error:", e)
+        return
+    if not isinstance(coins, list):
+        print("Dgens: jawab ghalat", getattr(r, "status_code", "?"))
+        return
+    for c in _new_launches("dgens", coins, lambda c: c.get("id"), lambda c: c.get("createdAt") or 0):
+        cid = c.get("id") or ""
+        links = [f'<a href="https://dgens.fun/coin/cardano/{cid}">dgens.fun</a>']
+        for k, lab in (("twitter", "X"), ("telegram", "Telegram"), ("discord", "Discord"), ("website", "Web")):
+            u = (c.get("links") or {}).get(k)
+            if u:
+                links.append(f'<a href="{html.escape(u)}">{lab}</a>')
+        dev = c.get("creatorName") or ""
+        extra = (f"Dev buy: {kfmt((num(c.get('devBuy')) or 0) / 1e6)} ADA" if c.get("devBuy") else "")
+        if dev:
+            extra += (" · " if extra else "") + f"Dev: {html.escape(dev)} ({c.get('creatorLaunches', 0)} launches, {c.get('creatorRugs', 0)} rugs)"
+        hook_send(DISCORD_DGENS, _launch_msg(c.get("ticker"), c.get("name"), _when(c.get("createdAt")),
+                                             c.get("description"), num(c.get("mcap")) or 0, extra, cid, links), "DGENS")
+        print("Dgens new:", c.get("ticker"))
+
+
+def check_solada():
+    try:
+        r = S.get("https://www.solada.fun/api/coins?view=cards", headers=BROWSER_H, timeout=30)
+        coins = (r.json() or {}).get("coins") if r.ok else None
+    except Exception as e:
+        print("Solada fetch error:", e)
+        return
+    if not isinstance(coins, list):
+        print("Solada: jawab ghalat", getattr(r, "status_code", "?"))
+        return
+    coins = [c for c in coins if not c.get("hidden")]
+    for c in _new_launches("solada", coins, lambda c: c.get("id"), lambda c: c.get("createdAtMs") or 0):
+        slug = c.get("slug") or c.get("id") or ""
+        kind = "Solana (pump)" if c.get("kind") == "pump" else "Cardano curve"
+        cv = c.get("curve") or {}
+        extra = kind + (f" · Grad: {kfmt(cv.get('graduationAda'))} ADA" if cv.get("graduationAda") else "")
+        links = [f'<a href="https://www.solada.fun/coin/{slug}">solada.fun</a>']
+        hook_send(DISCORD_SOLADA, _launch_msg(c.get("ticker"), c.get("name"), _when(c.get("createdAtMs")),
+                                              "", num(c.get("marketCapAda")) or 0, extra, "", links), "SOLADA")
+        print("Solada new:", c.get("ticker"))
+
+
 # =============== main ===============
 def main():
     if not (KEY and TG_TOKEN and TG_CHAT):
@@ -1533,6 +1644,7 @@ def main():
     last_wallet = 0
     last_zing = 0
     last_snek = 0
+    last_launch = 0
     while True:
         loop_start = time.time()
         try:
@@ -1561,6 +1673,13 @@ def main():
             except Exception as e:
                 print("Snekfun error:", e)
             last_snek = time.time()
+        if time.time() - last_launch >= LAUNCH_EVERY:
+            for fn in (check_dgens, check_solada):
+                try:
+                    fn()
+                except Exception as e:
+                    print(fn.__name__, "error:", e)
+            last_launch = time.time()
         maybe_summary()
         if checks == 1:
             print(f"Check 1: {len(orders)} ordres, {a} alerte(s), wallet {len(state['wallet'])} tokens")
