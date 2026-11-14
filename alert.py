@@ -977,6 +977,10 @@ def _tokens(d):
 
 
 def zing_swap_msg(kind, tid, qty, ada, txh, label=None):
+    sink = getattr(_SINK, "trades", None)
+    if sink is not None:
+        sink.append((kind, tid, qty, ada or 0, txh))
+        return ""
     label = label or ZING_NAME
     name = token_name(tid)
     info = dex1(tid)
@@ -1206,11 +1210,31 @@ def _zing_handle(tx, name, w):
     if not isinstance(w.get("pending"), list):
         w["pending"] = []
     try:
-        for m in zing_classify(tx, w["stake"], w["pending"], name):
-            zing_send(m)
+        trades, others = classify_trades(tx, w["stake"], w["pending"], name)
     except Exception as e:
         print("Zing classify error:", e)
+        trades, others = [], []
     w["pending"] = w["pending"][-60:]
+    for kind, tid, q, a, txh in trades:
+        try:
+            led = _ledger(w["stake"])
+            if led is not None and tx.get("block_height"):
+                led = ledger_sync(w["stake"], upto=tx["block_height"] - 1, create=False) or led
+            msg = zing_swap_msg(kind, tid, q, a or None, txh, name)
+            counted = bool(led) and led.get("h", 0) >= (tx.get("block_height") or 0) > 0
+            extra = trade_context(kind, tid, q, a, led, counted)
+            if extra:
+                ls = msg.split("\n")
+                msg = "\n".join(ls[:2] + extra + ls[2:])
+            zing_send(msg)
+            if kind == "buy":
+                c = convergence(name, tid)
+                if c:
+                    zing_send(c)
+        except Exception as e:
+            print("Zing trade msg error:", e)
+    for m in others:
+        zing_send(m)
 
 
 def zing_fast():
@@ -1267,6 +1291,10 @@ def zing_fast_loop():
             zing_fast()
         except Exception as e:
             print("Zing fast error:", e)
+        try:
+            ledger_seed_step()
+        except Exception as e:
+            print("Ledger seed error:", e)
         time.sleep(max(3, ZING_FAST_SEC - (time.time() - t0)))
 
 
@@ -1300,6 +1328,301 @@ def check_zing():
                     break
                 _zing_handle(tx, name, w)
                 w["height"] = max(w["height"], t.get("block_height", 0))
+
+
+# =============== PNL ledger + Portfolio ===============
+_SINK = threading.local()
+LEDGER_MAX_TX = int(os.environ.get("LEDGER_MAX_TX", "400"))
+PORTFOLIO_CHANNEL = os.environ.get("PORTFOLIO_CHANNEL", "").strip()
+PORTFOLIO_EVERY = int(os.environ.get("PORTFOLIO_EVERY_SEC", "600"))
+CONV_WINDOW = int(os.environ.get("CONV_WINDOW_MIN", "120")) * 60
+
+
+def classify_trades(tx, stake, pending, label=None):
+    """Bhal zing_classify walakin kayrj3 (trades, other_msgs). trades = [(kind, tid, qty, ada, txh)]."""
+    _SINK.trades = []
+    try:
+        msgs = zing_classify(tx, stake, pending, label)
+        trades = _SINK.trades
+    finally:
+        _SINK.trades = None
+    return trades, [m for m in msgs if m]
+
+
+def _ledger(stake):
+    return state.setdefault("ledgers", {}).get(stake)
+
+
+def _apply_trade(led, kind, tid, qty, ada):
+    if not ada or not qty:
+        return
+    t = led["tok"].setdefault(tid, {"bq": 0, "ba": 0, "sq": 0, "sa": 0})
+    if kind == "buy":
+        t["bq"] += qty
+        t["ba"] += ada
+    else:
+        t["sq"] += qty
+        t["sa"] += ada
+
+
+_LLOCK = threading.RLock()
+
+
+def ledger_sync(stake, upto=None, create=True):
+    """Kat7sseb buys/sells dyal wallet mn l'blockchain (incremental). upto = block max."""
+    with _LLOCK:
+        return _ledger_sync(stake, upto, create)
+
+
+def _ledger_sync(stake, upto=None, create=True):
+    led = _ledger(stake)
+    if led is None:
+        if not create:
+            return None
+        led = {"h": 0, "pend": [], "tok": {}, "n": 0}
+    txs = koios_get("account_txs", {"_stake_address": stake, "_after_block_height": led["h"] + 1,
+                                    "order": "block_height.desc", "limit": LEDGER_MAX_TX})
+    if not isinstance(txs, list):
+        return led if _ledger(stake) else None
+    txs = sorted(txs, key=lambda t: (t.get("block_height", 0), t.get("block_time", 0)))
+    if upto:
+        txs = [t for t in txs if t.get("block_height", 0) <= upto]
+    txs = txs[-LEDGER_MAX_TX:]
+    for i in range(0, len(txs), 25):
+        chunk = txs[i:i + 25]
+        info = koios("tx_info", {"_tx_hashes": [t["tx_hash"] for t in chunk], "_inputs": True, "_assets": True})
+        by = {t["tx_hash"]: t for t in info or []}
+        if not by:
+            break
+        for t in chunk:
+            tx = by.get(t["tx_hash"])
+            if tx:
+                try:
+                    trades, _ = classify_trades(tx, stake, led["pend"])
+                    for k, tid, q, a, _h in trades:
+                        _apply_trade(led, k, tid, q, a)
+                except Exception as e:
+                    print("Ledger classify error:", e)
+            led["h"] = max(led["h"], t.get("block_height", 0))
+            led["n"] += 1
+        led["pend"] = led["pend"][-60:]
+    state.setdefault("ledgers", {})[stake] = led
+    return led
+
+
+def avg_entry(led, tid):
+    t = (led or {}).get("tok", {}).get(tid)
+    if not t or t["bq"] <= 0:
+        return None
+    return t["ba"] / t["bq"]
+
+
+def trade_context(kind, tid, qty, ada, led, counted=False):
+    """Lines zaydin l message dyal Track: new position / adding / PnL / closed."""
+    if led is None:
+        return []
+    t = dict(led["tok"].get(tid) or {"bq": 0, "ba": 0, "sq": 0, "sa": 0})
+    if counted and qty and ada:  # had trade deja dkhal f ledger: n7aydouh
+        if kind == "buy":
+            t["bq"] -= qty
+            t["ba"] -= ada
+        else:
+            t["sq"] -= qty
+            t["sa"] -= ada
+    led = {"tok": {tid: t}}
+    held = t["bq"] - t["sq"]
+    avg = avg_entry(led, tid)
+    out = []
+    if kind == "buy":
+        if held <= max(t["bq"] * 0.02, 0):
+            out.append("\U0001F195 <b>New position</b>")
+        elif avg and ada and qty:
+            new_avg = (t["ba"] + ada) / (t["bq"] + qty)
+            out.append(f"➕ Adding · avg entry {pfmt(avg)} → {pfmt(new_avg)} ADA")
+    elif avg and ada and qty:
+        cost = qty * avg
+        pnl = ada - cost
+        p = pnl / cost * 100 if cost else 0
+        icon = "\U0001F4B5" if pnl >= 0 else "\U0001F4B8"
+        out.append(f"{icon} PnL: <b>{'+' if pnl >= 0 else ''}{kfmt(pnl)} ADA ({p:+.0f}%)</b> · avg entry {pfmt(avg)} ADA")
+        if held - qty <= t["bq"] * 0.02:
+            out.append("\U0001F6AA <b>Closed position</b>")
+    return out
+
+
+def convergence(name, tid):
+    """Ila 2+ wallets tracked chraw nafs token f 2h."""
+    c = state.setdefault("conv", {})
+    now = time.time()
+    lst = [x for x in c.get(tid, []) if now - x[1] < CONV_WINDOW and x[0] != name] + [[name, now]]
+    c[tid] = lst
+    for k in list(c):
+        c[k] = [x for x in c[k] if now - x[1] < CONV_WINDOW]
+        if not c[k]:
+            c.pop(k)
+    names = list(dict.fromkeys(x[0] for x in lst))
+    last = state.setdefault("conv_sent", {})
+    if len(names) >= 2 and now - last.get(tid, 0) > CONV_WINDOW and len(names) > last.get(tid + ":n", 0):
+        last[tid] = now
+        last[tid + ":n"] = len(names)
+        info = dex1(tid)
+        lines = [f"\U0001F525 <b>SMART MONEY: {len(names)} tracked wallets bought {token_name(tid)}</b>",
+                 "\U0001F465 " + ", ".join(names[:8])]
+        if info and info.get("mcap_ada"):
+            lines.append(f"\U0001F4CA MCAP: {kfmt(info['mcap_ada'])} ADA")
+        lines.append("\U0001F517 " + links(tid, info))
+        return "\n".join(lines)
+    return None
+
+
+def _holdings(stake):
+    acc = koios("account_info", {"_stake_addresses": [stake]})
+    ada = (num(acc[0].get("total_balance")) or 0) / 1e6 if acc else 0
+    rows = koios("account_assets", {"_stake_addresses": [stake]}) or []
+    hold = {}
+    for a in rows:
+        tid = a.get("policy_id", "") + a.get("asset_name", "")
+        dec = int(a.get("decimals") or 0)
+        hold[tid] = hold.get(tid, 0) + (num(a.get("quantity")) or 0) / (10 ** dec)
+    return ada, hold
+
+
+def portfolio_text(key, max_rows=15):
+    key = (key or "").strip()
+    label, w = find_zing(key) if key else (None, None)
+    if label:
+        stake = w.get("stake") or resolve_stake(w["addr"])
+    else:
+        stake = resolve_stake(key)
+        label = f"{key[:10]}…{key[-4:]}" if stake else None
+    if not stake:
+        return "❌ Unknown wallet. Use a tracked wallet name (/zing list) or an addr1… / stake1… address."
+    led = ledger_sync(stake)
+    ada, hold = _holdings(stake)
+    tids = sorted(hold, key=lambda t: -hold[t])[:150]
+    info = dexscreener(tids)
+    rows = []
+    for t in tids:
+        i = info.get(t) or {}
+        if not i.get("price"):
+            continue
+        v = i["price"] * hold[t]
+        if v < 1:
+            continue
+        avg = avg_entry(led, t)
+        pnl = (v - hold[t] * avg) if avg else None
+        rows.append((t, hold[t], v, avg, pnl, i.get("h24")))
+    rows.sort(key=lambda x: -x[2])
+    tok_val = sum(r[2] for r in rows)
+    unreal = sum(r[4] for r in rows if r[4] is not None)
+    cost_known = sum(r[1] * r[3] for r in rows if r[3])
+    realized = 0
+    for tid, t in (led or {}).get("tok", {}).items():
+        a = t["ba"] / t["bq"] if t["bq"] else None
+        if a and t["sq"]:
+            realized += t["sa"] - min(t["sq"], t["bq"]) * a
+    sign = lambda x: ("+" if x >= 0 else "") + kfmt(x)
+    lines = [f"\U0001F4BC <b>Portfolio · {label}</b>",
+             f"\U0001F4B0 Total: <b>{kfmt(ada + tok_val)} ADA</b> (ADA {kfmt(ada)} + tokens {kfmt(tok_val)})",
+             f"\U0001F4C8 Unrealized PnL: <b>{sign(unreal)} ADA</b>"
+             + (f" ({unreal / cost_known * 100:+.0f}%)" if cost_known else "")
+             + f" · Realized: <b>{sign(realized)} ADA</b>", ""]
+    for t, q, v, avg, pnl, h24 in rows[:max_rows]:
+        s = f"• <b>{token_name(t)}</b>: {kfmt(v)} ADA"
+        if pnl is not None and avg:
+            p = pnl / (q * avg) * 100 if q * avg else 0
+            dot = "\U0001F7E2" if pnl >= 0 else "\U0001F534"
+            s += f" · {dot} {sign(pnl)} ({p:+.0f}%) · entry {pfmt(avg)}"
+        else:
+            s += " · entry ?"
+        if h24 is not None:
+            s += f" · 24h {pct(h24)}"
+        lines.append(s)
+    if len(rows) > max_rows:
+        lines.append(f"… +{len(rows) - max_rows} more tokens")
+    lines.append(f"\n<i>PnL from the last {led['n'] if led else 0} on-chain txs. Tokens received by transfer show entry ?.</i>")
+    lines.append(f'\U0001F517 <a href="https://cardanoscan.io/stakekey/{stake}">Cardanoscan</a>')
+    return "\n".join(lines)
+
+
+def portfolio_set(address):
+    address = (address or "").strip()
+    stake = resolve_stake(address)
+    if not stake:
+        return "❌ Not a valid addr1… / stake1… address."
+    mine = state.setdefault("my_wallets", [])
+    if address in mine:
+        mine.remove(address)
+        state["portfolio_next"] = 0
+        return "\U0001F5D1️ Removed from your #portfolio board."
+    if len(mine) >= 3:
+        return "⚠️ Max 3 wallets on the board. Run /portfolio set again with one of them to remove it."
+    mine.append(address)
+    state["portfolio_next"] = 0
+    return "✅ Added to your #portfolio board. It updates every 10 min (first update in ~1 min)."
+
+
+def bot_post(chan_id, text, edit_id=None):
+    """Kaysift (wla kay3dl) message b l'bot f channel. Kayrj3 message id."""
+    if not (DISCORD_BOT_TOKEN and chan_id):
+        print("BOT POST:", text[:200])
+        return None
+    url = f"https://discord.com/api/v10/channels/{chan_id}/messages"
+    body = {"content": html_to_md(text)[:1990], "flags": 4, "allowed_mentions": {"parse": []}}
+    h = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
+    try:
+        for _ in range(2):
+            r = (S.patch(f"{url}/{edit_id}", json=body, headers=h, timeout=20) if edit_id
+                 else S.post(url, json=body, headers=h, timeout=20))
+            if r.status_code == 429:
+                time.sleep(min(float((r.json() or {}).get("retry_after", 2)), 10))
+                continue
+            if r.status_code == 404 and edit_id:
+                edit_id = None
+                continue
+            if not r.ok:
+                print("Bot post error:", r.status_code, r.text[:200])
+                return None
+            return r.json().get("id")
+    except Exception as e:
+        print("Bot post exception:", e)
+    return None
+
+
+def portfolio_board():
+    if not PORTFOLIO_CHANNEL or time.time() < state.get("portfolio_next", 0):
+        return
+    state["portfolio_next"] = time.time() + PORTFOLIO_EVERY
+    mine = state.get("my_wallets") or []
+    msgs = state.setdefault("portfolio_msgs", [])
+    texts = [portfolio_text(a, max_rows=12) for a in mine] or [
+        "\U0001F4BC <b>Your portfolio</b>\nNo wallet yet. Type <b>/portfolio set</b> with your address and this board "
+        "will show your positions and PnL, updated every 10 min."]
+    stamp = f"\n\U0001F552 Updated {now_local():%d/%m %H:%M}"
+    new_ids = []
+    for i, t in enumerate(texts):
+        mid = bot_post(PORTFOLIO_CHANNEL, t[:1900] + stamp, msgs[i] if i < len(msgs) else None)
+        new_ids.append(mid or (msgs[i] if i < len(msgs) else None))
+    for mid in msgs[len(texts):]:
+        if mid and DISCORD_BOT_TOKEN:
+            try:
+                S.delete(f"https://discord.com/api/v10/channels/{PORTFOLIO_CHANNEL}/messages/{mid}",
+                         headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}, timeout=20)
+            except Exception:
+                pass
+    state["portfolio_msgs"] = [m for m in new_ids if m]
+
+
+def ledger_seed_step():
+    """F background: kol 2 min, kat7sseb PnL dyal wallet tracked wa7d ma 3ndouch ledger."""
+    if time.time() - state.get("ledger_seed_t", 0) < 120:
+        return
+    for name, w in list(zings().items()):
+        if w.get("stake") and _ledger(w["stake"]) is None:
+            state["ledger_seed_t"] = time.time()
+            ledger_sync(w["stake"])
+            print(f"Ledger ready: {name} ({len(_ledger(w['stake'])['tok'])} tokens)")
+            return
 
 
 # =============== Discord bot (/zing, /price ...) ===============
@@ -1534,6 +1857,21 @@ def start_discord_bot():
 
     tree.add_command(zing_group, guild=guild)
 
+    pf_group = app_commands.Group(name="portfolio", description="Positions and PnL")
+
+    @pf_group.command(name="view", description="Positions and PnL of a wallet (tracked name or address)")
+    @app_commands.describe(wallet="Tracked wallet name, or any addr1… / stake1… address")
+    @app_commands.autocomplete(wallet=wallet_names)
+    async def pf_view(inter: discord.Interaction, wallet: str):
+        await answer(inter, portfolio_text, wallet)
+
+    @pf_group.command(name="set", description="Add/remove your own wallet on the #portfolio board")
+    @app_commands.describe(address="Your wallet address (addr1… or stake1…)")
+    async def pf_set(inter: discord.Interaction, address: str):
+        await answer(inter, portfolio_set, address)
+
+    tree.add_command(pf_group, guild=guild)
+
     @tree.command(name="trending", description="Top tokens by volume on DexHunter right now", guild=guild)
     async def c_trending(inter: discord.Interaction):
         await answer(inter, trending_text)
@@ -1592,7 +1930,7 @@ SNEKFUN_EVERY = int(os.environ.get("SNEKFUN_EVERY_SEC", "60"))
 
 def snek_send(text):
     if not DISCORD_SNEKFUN:
-        print("SNEKFUN:", text[:200])
+        bot_post(os.environ.get("SNEKFUN_CHANNEL", "").strip(), text)
         return
     body = {"content": html_to_md(text)[:1990], "flags": 4, "allowed_mentions": {"parse": []}}
     try:
@@ -1671,8 +2009,8 @@ BROWSER_H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKi
 
 
 def hook_send(url, text, tag):
-    if not url:
-        print(f"{tag}:", text[:200])
+    if not url or url.startswith("chan:"):
+        bot_post(url[5:] if url else "", text)
         return
     body = {"content": html_to_md(text)[:1990], "flags": 4, "allowed_mentions": {"parse": []}}
     try:
@@ -1746,7 +2084,7 @@ def check_dgens():
         extra = (f"Dev buy: {kfmt((num(c.get('devBuy')) or 0) / 1e6)} ADA" if c.get("devBuy") else "")
         if dev:
             extra += (" · " if extra else "") + f"Dev: {html.escape(dev)} ({c.get('creatorLaunches', 0)} launches, {c.get('creatorRugs', 0)} rugs)"
-        hook_send(DISCORD_DGENS, _launch_msg(c.get("ticker"), c.get("name"), _when(c.get("createdAt")),
+        hook_send(DISCORD_DGENS or "chan:" + os.environ.get("DGENS_CHANNEL", "").strip(), _launch_msg(c.get("ticker"), c.get("name"), _when(c.get("createdAt")),
                                              c.get("description"), num(c.get("mcap")) or 0, extra, cid, links), "DGENS")
         print("Dgens new:", c.get("ticker"))
 
@@ -1768,7 +2106,7 @@ def check_solada():
         cv = c.get("curve") or {}
         extra = kind + (f" · Grad: {kfmt(cv.get('graduationAda'))} ADA" if cv.get("graduationAda") else "")
         links = [f'<a href="https://www.solada.fun/coin/{slug}">solada.fun</a>']
-        hook_send(DISCORD_SOLADA, _launch_msg(c.get("ticker"), c.get("name"), _when(c.get("createdAtMs")),
+        hook_send(DISCORD_SOLADA or "chan:" + os.environ.get("SOLADA_CHANNEL", "").strip(), _launch_msg(c.get("ticker"), c.get("name"), _when(c.get("createdAtMs")),
                                               "", num(c.get("marketCapAda")) or 0, extra, "", links), "SOLADA")
         print("Solada new:", c.get("ticker"))
 
@@ -1831,6 +2169,10 @@ def main():
                 except Exception as e:
                     print(fn.__name__, "error:", e)
             last_launch = time.time()
+        try:
+            portfolio_board()
+        except Exception as e:
+            print("Portfolio board error:", e)
         maybe_summary()
         if checks == 1:
             print(f"Check 1: {len(orders)} ordres, {a} alerte(s), wallet {len(state['wallet'])} tokens")
