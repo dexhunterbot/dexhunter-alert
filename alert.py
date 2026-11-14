@@ -1958,6 +1958,11 @@ def check_snekfun():
         return
     seen = state.setdefault("snek_seen", [])
     first = not state.get("snek_init")
+    if not first and not state.get("snek_bf"):  # mra wa7da: nsifto akhir 3 launches bach tban l channel khddama
+        state["snek_bf"] = True
+        newest = sorted(lst, key=lambda p: (p.get("pool") or {}).get("createdOn") or 0)[-3:]
+        drop = {(p.get("info") or {}).get("asset") for p in newest}
+        seen[:] = [a for a in seen if a not in drop]
     new = []
     for p in lst:
         info = p.get("info") or {}
@@ -2073,6 +2078,10 @@ def check_dgens():
     if not isinstance(coins, list):
         print("Dgens: jawab ghalat", getattr(r, "status_code", "?"))
         return
+    if state.get("dgens_init") and not state.get("dgens_bf"):
+        state["dgens_bf"] = True
+        drop = {c.get("id") for c in sorted(coins, key=lambda c: c.get("createdAt") or 0)[-3:]}
+        state["dgens_seen"] = [i for i in state.get("dgens_seen", []) if i not in drop]
     for c in _new_launches("dgens", coins, lambda c: c.get("id"), lambda c: c.get("createdAt") or 0):
         cid = c.get("id") or ""
         links = [f'<a href="https://dgens.fun/coin/cardano/{cid}">dgens.fun</a>']
