@@ -1085,9 +1085,9 @@ def zing_classify(tx, stake, pending, label=None):
         for v in to_people.values():
             _add(total, v)
         if total.get("", 0) >= 1 or _tokens(total):
-            lines = [f"\U0001F4E4 <b>{label} sifet {_fmt_assets(total)}</b>"]
+            lines = [f"\U0001F4E4 <b>{label} sent {_fmt_assets(total)}</b>"]
             for a, v in sorted(to_people.items(), key=lambda kv: -kv[1].get("", 0))[:3]:
-                lines.append(f"\u27A1\ufe0f l: {addr_link(a)} ({_fmt_assets(v)})")
+                lines.append(f"\u27A1\ufe0f to: {addr_link(a)} ({_fmt_assets(v)})")
             lines.append(f'\U0001F517 <a href="https://cardanoscan.io/transaction/{txh}">Tx</a>')
             msgs.append("\n".join(lines))
     # 5) jato mn chi wa7d
@@ -1096,9 +1096,9 @@ def zing_classify(tx, stake, pending, label=None):
         if got.get("", 0) < 1:
             got.pop("", None)
         if got:
-            lines = [f"\U0001F4E5 <b>{label} jato {_fmt_assets(got)}</b>"]
+            lines = [f"\U0001F4E5 <b>{label} received {_fmt_assets(got)}</b>"]
             for a in list(from_people)[:3]:
-                lines.append(f"\u2B05\ufe0f mn: {addr_link(a)}")
+                lines.append(f"\u2B05\ufe0f from: {addr_link(a)}")
             lines.append(f'\U0001F517 <a href="https://cardanoscan.io/transaction/{txh}">Tx</a>')
             msgs.append("\n".join(lines))
     return msgs
@@ -1147,36 +1147,36 @@ def zing_add(addr, name):
     name = (name or "").strip()[:30] or f"{addr[:8]}…{addr[-4:]}"
     stake = resolve_stake(addr)
     if not stake:
-        return "❌ Had l'adresse ma s7i7ach. Khassha tbda b <code>addr1</code> wla <code>stake1</code>."
+        return "❌ Invalid address. It must start with <code>addr1</code> or <code>stake1</code>."
     z = zings()
     for n, w in z.items():
         if w.get("stake") == stake:
-            return f"⚠️ Had l'wallet deja kattab3o b smiya <b>{n}</b>."
+            return f"⚠️ This wallet is already tracked as <b>{n}</b>."
     if name in z:
-        return f"⚠️ Smiya <b>{name}</b> deja kayna. Khtar smiya khra."
+        return f"⚠️ The name <b>{name}</b> is already used. Pick another name."
     if len(z) >= 25:
-        return "⚠️ Wslti l 25 wallet. 7ayd chi wa7d b /zing remove 9bel."
+        return "⚠️ You reached 25 wallets. Remove one with /zing remove first."
     tip = koios_get("tip", {})
     z[name] = {"addr": addr, "stake": stake, "height": tip[0].get("block_no", 0) if tip else 0, "pending": []}
     save_state()
-    return (f"✅ Zedt <b>{name}</b> \U0001F433\n{addr_link(addr)}\n"
-            f"Ay buy, sell, sifet wla jato mn daba ghadi yban f #zing-wallet.")
+    return (f"✅ Now tracking <b>{name}</b> \U0001F433\n{addr_link(addr)}\n"
+            f"Every buy, sell, send and receive will be posted in #zing-wallet.")
 
 
 def zing_remove(key):
     name, w = find_zing(key)
     if not name:
-        return f"❌ Ma l9itch wallet b smiya <b>{key}</b>. Chouf /zing list."
+        return f"❌ No tracked wallet named <b>{key}</b>. See /zing list."
     zings().pop(name, None)
     save_state()
-    return f"\U0001F5D1️ 7ayydt <b>{name}</b>. Ma b9itch ntab3o."
+    return f"\U0001F5D1️ Stopped tracking <b>{name}</b>."
 
 
 def zing_list_text():
     z = zings()
     if not z:
-        return "Ma kattab3 7tta wallet. Zid wa7d b /zing add."
-    lines = [f"\U0001F433 <b>Wallets li kattab3 ({len(z)})</b>"]
+        return "No wallets tracked yet. Add one with /zing wallet."
+    lines = [f"\U0001F433 <b>Tracked wallets ({len(z)})</b>"]
     for n, w in z.items():
         lines.append(f"• <b>{n}</b>: {addr_link(w['addr'])}")
     return "\n".join(lines)
@@ -1306,10 +1306,10 @@ def trending_text():
     except Exception:
         lst = []
     if not lst:
-        return "Ma jat 7tta data mn DexHunter, 3awd mn b3d."
+        return "No data from DexHunter right now, try again in a minute."
     tids = [t["token_id"] for t in lst if t.get("token_id")]
     info = dexscreener(tids)
-    lines = ["\U0001F525 <b>Trending f DexHunter</b>"]
+    lines = ["\U0001F525 <b>Trending on DexHunter</b>"]
     for t in lst[:12]:
         tid = t.get("token_id")
         i = info.get(tid) or {}
@@ -1385,65 +1385,36 @@ def start_discord_bot():
         try:
             text = await asyncio.get_running_loop().run_in_executor(None, lambda: fn(*args))
         except Exception as e:
-            text = f"Wa9e3 chi mochkil: {e}"
+            text = f"Something went wrong: {e}"
         for c in _chunks(html_to_md(text)):
             await inter.followup.send(c, suppress_embeds=True)
 
-    zing_group = app_commands.Group(name="zing", description="Tab3 wallets (whales)")
+    zing_group = app_commands.Group(name="zing", description="Track Cardano wallets (whales)")
 
     async def wallet_names(inter: discord.Interaction, current: str):
         cur = (current or "").lower()
         return [app_commands.Choice(name=n, value=n) for n in list(zings()) if cur in n.lower()][:25]
 
-    @zing_group.command(name="add", description="Zid wallet bach ttab3o")
-    @app_commands.describe(adresse="Adresse (addr1... wla stake1...)", smiya="Smiya l had wallet (b7al Imad)")
-    async def z_add(inter: discord.Interaction, adresse: str, smiya: str):
-        await answer(inter, zing_add, adresse, smiya)
+    @zing_group.command(name="wallet", description="Start tracking a wallet")
+    @app_commands.describe(address="Wallet address (addr1... or stake1...)", name="A name for this wallet")
+    async def z_wallet(inter: discord.Interaction, address: str, name: str):
+        await answer(inter, zing_add, address, name)
 
-    @zing_group.command(name="list", description="Lista dyal wallets li kattab3")
+    @zing_group.command(name="list", description="List the wallets you track")
     async def z_list(inter: discord.Interaction):
         await answer(inter, zing_list_text)
 
-    @zing_group.command(name="remove", description="7ayd wallet mn lista")
-    @app_commands.describe(smiya="Smiya dyal wallet")
-    @app_commands.autocomplete(smiya=wallet_names)
-    async def z_remove(inter: discord.Interaction, smiya: str):
-        await answer(inter, zing_remove, smiya)
-
-    @zing_group.command(name="wallet", description="Ach 3nd wallet daba (tokens, qima, MCAP)")
-    @app_commands.describe(smiya="Smiya dyal wallet")
-    @app_commands.autocomplete(smiya=wallet_names)
-    async def z_wallet(inter: discord.Interaction, smiya: str):
-        await answer(inter, zing_holdings_text, smiya)
-
-    @zing_group.command(name="tx", description="Akhir Tx dyal wallet (buy, sell, sifet, jato)")
-    @app_commands.describe(smiya="Smiya dyal wallet", n="Ch7al mn Tx (1-20)")
-    @app_commands.autocomplete(smiya=wallet_names)
-    async def z_tx(inter: discord.Interaction, smiya: str, n: app_commands.Range[int, 1, 20] = 10):
-        await answer(inter, zing_recent_text, smiya, n)
+    @zing_group.command(name="remove", description="Stop tracking a wallet")
+    @app_commands.describe(name="Wallet name")
+    @app_commands.autocomplete(name=wallet_names)
+    async def z_remove(inter: discord.Interaction, name: str):
+        await answer(inter, zing_remove, name)
 
     tree.add_command(zing_group, guild=guild)
 
-    @tree.command(name="price", description="Prix, MCAP, 1h/24h w chart dyal token", guild=guild)
-    @app_commands.describe(token="Smiya (b7al SNEK) wla CA")
-    async def c_price(inter: discord.Interaction, token: str):
-        await answer(inter, cmd_price, token)
-
-    @tree.command(name="trending", description="Tokens li fihom volume daba f DexHunter", guild=guild)
+    @tree.command(name="trending", description="Top tokens by volume on DexHunter right now", guild=guild)
     async def c_trending(inter: discord.Interaction):
         await answer(inter, trending_text)
-
-    @tree.command(name="whales", description="Akbar big buys w sells lyoum", guild=guild)
-    async def c_whales(inter: discord.Interaction):
-        await answer(inter, whales_text)
-
-    @tree.command(name="summary", description="Résumé dyal nhar", guild=guild)
-    async def c_summary(inter: discord.Interaction):
-        await answer(inter, summary_text)
-
-    @tree.command(name="help", description="Lista dyal commands", guild=guild)
-    async def c_help(inter: discord.Interaction):
-        await answer(inter, lambda: DISCORD_HELP)
 
     @client.event
     async def on_ready():
