@@ -2291,6 +2291,130 @@ def _launch_msg(tick, name, when, desc, mcap, extra, ca, links):
     return "\n".join(lines)
 
 
+def stake_of(addr):
+    """stake1… mn addr1… (base address)."""
+    try:
+        b = b32_decode(addr or "")
+        if len(b) >= 57:
+            return b32_encode("stake", [0xE1] + list(b[29:57]))
+    except Exception:
+        pass
+    return ""
+
+
+def dev_funder(dev_stake, created):
+    """(wallet age sec, funder addr, ADA li sift, sec 9bel launch) mn awel Tx dyal dev."""
+    out = {"age": None, "funder": "", "sent": None, "before": None}
+    if not dev_stake:
+        return out
+    try:
+        first = koios_get("account_txs", {"_stake_address": dev_stake, "order": "block_height.asc", "limit": 1})
+        if not (isinstance(first, list) and first):
+            return out
+        out["age"] = created - (first[0].get("block_time") or created)
+        ft = (koios("tx_info", {"_tx_hashes": [first[0]["tx_hash"]], "_inputs": True}) or [None])[0]
+        if ft:
+            ins = [u for u in ft.get("inputs") or [] if u.get("stake_addr") != dev_stake]
+            if ins:
+                out["funder"] = ins[0]["payment_addr"]["bech32"]
+                out["sent"] = sum((num(o.get("value")) or 0) for o in ft.get("outputs") or []
+                                  if o.get("stake_addr") == dev_stake) / 1e6
+                out["before"] = created - (ft.get("tx_timestamp") or created)
+    except Exception as e:
+        print("Dev funder error:", e)
+    return out
+
+
+def launch_card(site, chain, tick, url, logo, desc, created, tok_lines, dev_addr, dev_extra, prev,
+                fund, fund_prev, ca, links, mc_label="MC"):
+    """Embed b nafs chkel dyal snek_card. prev/fund_prev = [(ticker, mcap)]."""
+    cs = lambda a: f"https://cardanoscan.io/address/{a}"
+    dev = [f"\U0001F464 Wallet [`{short_addr(dev_addr)}`]({cs(dev_addr)})" if dev_addr else "\U0001F464 Wallet `?`",
+           f"\u23F3 Wallet age `{_ago(fund['age'])}`" if fund.get("age") is not None else "\u23F3 Wallet age `new`"]
+    tk = lambda lst: " ".join(f"`${t}`" for t, _ in lst[:2]) + (f" `+{len(lst) - 2}`" if len(lst) > 2 else "")
+    dev.append((f"\U0001F680 Launches `{len(prev)}` " + tk(prev)) if prev else "\U0001F680 Launches `0` · first launch")
+    best = max(prev, key=lambda x: x[1] or 0) if prev else None
+    if best and best[1]:
+        dev.append(f"\U0001F3C6 Best `{kfmt(best[1])} ₳ {mc_label}` on `${best[0]}`")
+    dev += dev_extra
+    fl = []
+    if fund.get("funder"):
+        fl = [f"\U0001F3E6 Wallet [`{short_addr(fund['funder'])}`]({cs(fund['funder'])})"]
+        if fund.get("sent"):
+            fl.append(f"\U0001F4B8 Sent `{kfmt(fund['sent'])} ₳` {_ago(fund['before'])} before launch")
+        fl.append((f"\u26A0\ufe0f Launches `{len(fund_prev)}` " + tk(fund_prev)) if fund_prev else "\u2705 Launches `0`")
+    emb = {
+        "author": {"name": f"New coin on {site} · {chain}"},
+        "title": f"${tick}",
+        "url": url,
+        "color": 0xF5A623,
+        "fields": [{"name": "Token", "value": "\n".join(tok_lines)},
+                   {"name": "Dev", "value": "\n".join(dev)}]
+                  + ([{"name": "Funder", "value": "\n".join(fl)}] if fl else [])
+                  + ([{"name": "Contract", "value": f"```{ca}```"}] if ca else [])
+                  + [{"name": "Links", "value": " · ".join(links)}],
+        "footer": {"text": "Notif DEX launch alert · not financial advice"},
+        "timestamp": datetime.fromtimestamp(created, timezone.utc).isoformat(),
+    }
+    if desc:
+        emb["description"] = str(desc).strip()[:200]
+    if logo:
+        emb["thumbnail"] = {"url": logo}
+        emb["author"]["icon_url"] = logo
+    return emb
+
+
+def _soc_links(lk):
+    out = []
+    for k, lab in (("twitter", "X"), ("telegram", "Telegram"), ("discord", "Discord"), ("website", "Web")):
+        if (lk or {}).get(k):
+            out.append(f"[{lab}]({lk[k]})")
+    return out
+
+
+def dgens_all():
+    allc = []
+    for off in range(0, 400, 50):
+        try:
+            r = S.get(f"https://dgens.fun/api/coins?chain=cardano&sort=new&limit=50&offset={off}",
+                      headers=BROWSER_H, timeout=20)
+            c = (r.json() or {}).get("coins") or [] if r.ok else []
+        except Exception:
+            c = []
+        allc += c
+        if len(c) < 50:
+            break
+    return allc
+
+
+def dgens_card(c, allc):
+    cid = c.get("id") or ""
+    created = int((c.get("createdAt") or time.time() * 1000) / 1000)
+    dev_addr = c.get("creator") or ""
+    dst = stake_of(dev_addr)
+    fund = dev_funder(dst, created)
+    prev = [(x.get("ticker"), num(x.get("athMcap")) or num(x.get("mcap")) or 0) for x in allc
+            if x.get("id") != cid and dst and stake_of(x.get("creator")) == dst]
+    fst = stake_of(fund["funder"]) if fund.get("funder") else ""
+    fprev = [(x.get("ticker"), num(x.get("athMcap")) or 0) for x in allc
+             if fst and fst != dst and stake_of(x.get("creator")) == fst]
+    dbuy = (num(c.get("devBuy")) or 0) / 1e6
+    tok = [f"\U0001F4A7 MC `{kfmt(num(c.get('mcap')) or 0)} ₳`",
+           f"\U0001F465 Holders `{c.get('holders') if c.get('holders') is not None else '–'}`",
+           f"\U0001F4BB Dev buy `{kfmt(dbuy)} ₳`" if dbuy > 0.5 else "\U0001F4BB Dev buy `–`",
+           f"\U0001F4C8 Bonding `{(num(c.get('progressBps')) or 0) / 100:.0f}%`"]
+    if (c.get("devLock") or {}).get("tokens") and not (c.get("devLock") or {}).get("unlocked"):
+        tok.append(f"\U0001F512 Dev tokens locked until `{datetime.fromtimestamp((c['devLock'].get('until') or 0) / 1000, TZ):%d/%m/%Y}`")
+    extra = []
+    if c.get("creatorRugs"):
+        extra.append(f"\u2620\ufe0f Rugs `{c['creatorRugs']}`")
+    url = f"https://dgens.fun/coin/cardano/{cid}"
+    logo = ("https://dgens.fun" + c["image"]) if (c.get("image") or "").startswith("/") else c.get("image")
+    return launch_card("dgens.fun", "Cardano", c.get("ticker") or "?", url, logo, c.get("description"), created,
+                       tok, dev_addr, extra, prev, fund, fprev, cid,
+                       [f"[Trade on dgens.fun]({url})"] + _soc_links(c.get("links")), mc_label="ATH MC")
+
+
 def check_dgens():
     try:
         r = S.get("https://dgens.fun/api/coins?chain=cardano&sort=new&limit=50&offset=0",
@@ -2302,24 +2426,56 @@ def check_dgens():
     if not isinstance(coins, list):
         print("Dgens: jawab ghalat", getattr(r, "status_code", "?"))
         return
-    if state.get("dgens_init") and not state.get("dgens_bf"):
-        state["dgens_bf"] = True
+    if state.get("dgens_init") and not state.get("dgens_bf2"):
+        state["dgens_bf2"] = True
         drop = {c.get("id") for c in sorted(coins, key=lambda c: c.get("createdAt") or 0)[-3:]}
         state["dgens_seen"] = [i for i in state.get("dgens_seen", []) if i not in drop]
-    for c in _new_launches("dgens", coins, lambda c: c.get("id"), lambda c: c.get("createdAt") or 0):
-        cid = c.get("id") or ""
-        links = [f'<a href="https://dgens.fun/coin/cardano/{cid}">dgens.fun</a>']
-        for k, lab in (("twitter", "X"), ("telegram", "Telegram"), ("discord", "Discord"), ("website", "Web")):
-            u = (c.get("links") or {}).get(k)
-            if u:
-                links.append(f'<a href="{html.escape(u)}">{lab}</a>')
-        dev = c.get("creatorName") or ""
-        extra = (f"Dev buy: {kfmt((num(c.get('devBuy')) or 0) / 1e6)} ADA" if c.get("devBuy") else "")
-        if dev:
-            extra += (" · " if extra else "") + f"Dev: {html.escape(dev)} ({c.get('creatorLaunches', 0)} launches, {c.get('creatorRugs', 0)} rugs)"
-        hook_send(DISCORD_DGENS or "chan:" + os.environ.get("DGENS_CHANNEL", "").strip(), _launch_msg(c.get("ticker"), c.get("name"), _when(c.get("createdAt")),
-                                             c.get("description"), num(c.get("mcap")) or 0, extra, cid, links), "DGENS")
+    new = _new_launches("dgens", coins, lambda c: c.get("id"), lambda c: c.get("createdAt") or 0)
+    allc = dgens_all() if new else []
+    for c in new:
+        try:
+            emb = dgens_card(c, allc or coins)
+        except Exception as e:
+            print("Dgens card error:", e)
+            continue
+        post_embed(os.environ.get("DGENS_CHANNEL", "").strip(), emb, DISCORD_DGENS or None)
         print("Dgens new:", c.get("ticker"))
+
+
+def solada_card(c, allc):
+    sid = c.get("id") or ""
+    slug = c.get("slug") or sid
+    created = int((c.get("createdAtMs") or time.time() * 1000) / 1000)
+    dev_addr = c.get("launcherAddress") or ""
+    dst = stake_of(dev_addr)
+    fund = dev_funder(dst, created)
+    prev = [(x.get("ticker"), num(x.get("marketCapAda")) or 0) for x in allc
+            if x.get("id") != sid and dst and stake_of(x.get("launcherAddress")) == dst]
+    fst = stake_of(fund["funder"]) if fund.get("funder") else ""
+    fprev = [(x.get("ticker"), num(x.get("marketCapAda")) or 0) for x in allc
+             if fst and fst != dst and stake_of(x.get("launcherAddress")) == fst]
+    dbuy, dpct = 0, None
+    try:
+        tr = S.get(f"https://www.solada.fun/api/coins/{sid}/trades", headers=BROWSER_H, timeout=20).json()
+        dbuy = sum((num(t.get("lovelace")) or 0) for t in tr.get("trades") or []
+                   if t.get("dev") and t.get("side") == "buy") / 1e6
+        ho = S.get(f"https://www.solada.fun/api/coins/{sid}/holders", headers=BROWSER_H, timeout=20).json()
+        dpct = (ho.get("dev") or {}).get("pct")
+    except Exception:
+        pass
+    cv = c.get("curve") or {}
+    bond = (num(cv.get("progressBps")) or num((c.get("pump") or {}).get("progressBps")) or 0) / 100
+    tok = [f"\U0001F4A7 MC `{kfmt(num(c.get('marketCapAda')) or 0)} ₳`",
+           f"\U0001F465 Holders `{c.get('holders') if c.get('holders') is not None else '–'}`",
+           f"\U0001F4BB Dev buy `{kfmt(dbuy)} ₳`" + (f" · holds `{dpct:.1f}%`" if dpct else "") if dbuy > 0.5
+           else "\U0001F4BB Dev buy `–`",
+           f"\U0001F4C8 Bonding `{bond:.0f}%`"]
+    pump = c.get("kind") == "pump"
+    ca = c.get("pumpMint") if pump else ((c.get("policyId") or "") + (c.get("assetName") or ""))
+    url = f"https://www.solada.fun/coin/{slug}"
+    return launch_card("solada.fun", "Solana" if pump else "Cardano", c.get("ticker") or "?", url,
+                       c.get("imageUri"), c.get("description"), created, tok, dev_addr, [], prev, fund, fprev,
+                       ca, [f"[Trade on solada.fun]({url})"] + _soc_links(c.get("links")), mc_label="MC")
 
 
 def check_solada():
@@ -2333,14 +2489,25 @@ def check_solada():
         print("Solada: jawab ghalat", getattr(r, "status_code", "?"))
         return
     coins = [c for c in coins if not c.get("hidden")]
-    for c in _new_launches("solada", coins, lambda c: c.get("id"), lambda c: c.get("createdAtMs") or 0):
-        slug = c.get("slug") or c.get("id") or ""
-        kind = "Solana (pump)" if c.get("kind") == "pump" else "Cardano curve"
-        cv = c.get("curve") or {}
-        extra = kind + (f" · Grad: {kfmt(cv.get('graduationAda'))} ADA" if cv.get("graduationAda") else "")
-        links = [f'<a href="https://www.solada.fun/coin/{slug}">solada.fun</a>']
-        hook_send(DISCORD_SOLADA or "chan:" + os.environ.get("SOLADA_CHANNEL", "").strip(), _launch_msg(c.get("ticker"), c.get("name"), _when(c.get("createdAtMs")),
-                                              "", num(c.get("marketCapAda")) or 0, extra, "", links), "SOLADA")
+    if state.get("solada_init") and not state.get("solada_bf2"):
+        state["solada_bf2"] = True
+        drop = {c.get("id") for c in sorted(coins, key=lambda c: c.get("createdAtMs") or 0)[-3:]}
+        state["solada_seen"] = [i for i in state.get("solada_seen", []) if i not in drop]
+    new = _new_launches("solada", coins, lambda c: c.get("id"), lambda c: c.get("createdAtMs") or 0)
+    if not new:
+        return
+    try:  # lista kamla (fiha launcherAddress) ghir mni kayn launch jdid
+        full = (S.get("https://www.solada.fun/api/coins", headers=BROWSER_H, timeout=60).json() or {}).get("coins") or []
+    except Exception:
+        full = []
+    byid = {x.get("id"): x for x in full}
+    for c in new:
+        try:
+            emb = solada_card(byid.get(c.get("id")) or c, full)
+        except Exception as e:
+            print("Solada card error:", e)
+            continue
+        post_embed(os.environ.get("SOLADA_CHANNEL", "").strip(), emb, DISCORD_SOLADA or None)
         print("Solada new:", c.get("ticker"))
 
 
