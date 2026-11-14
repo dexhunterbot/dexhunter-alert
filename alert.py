@@ -1138,12 +1138,226 @@ def check_zing():
     z["pending"] = z["pending"][-60:]
 
 
+# =============== Discord bot (/zing, /price ...) ===============
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+DISCORD_GUILD_ID = os.environ.get("DISCORD_GUILD_ID", "").strip()
+
+
+def _zing_stake_addr():
+    if not _zing_stake[0] and ZING_ADDR:
+        ai = koios("address_info", {"_addresses": [ZING_ADDR]})
+        _zing_stake[0] = (ai[0].get("stake_address") if ai else None) or ""
+    return _zing_stake[0]
+
+
+def zing_holdings_text():
+    stake = _zing_stake_addr()
+    if not stake:
+        return "Ma kaynach adresse dyal Zing (ZING_ADDR)."
+    acc = koios("account_info", {"_stake_addresses": [stake]})
+    ada = (num(acc[0].get("total_balance")) or 0) / 1e6 if acc else 0
+    rows = koios("account_assets", {"_stake_addresses": [stake]}) or []
+    hold = {}
+    for a in rows:
+        tid = a.get("policy_id", "") + a.get("asset_name", "")
+        dec = int(a.get("decimals") or 0)
+        hold[tid] = hold.get(tid, 0) + (num(a.get("quantity")) or 0) / (10 ** dec)
+    tids = sorted(hold, key=lambda t: -hold[t])[:150]
+    info = dexscreener(tids)
+    items = []
+    for t in tids:
+        i = info.get(t) or {}
+        if i.get("price"):
+            v = i["price"] * hold[t]
+            if v >= 1:
+                items.append((t, hold[t], v, i.get("mcap_ada"), i.get("h24")))
+    items.sort(key=lambda x: -x[2])
+    tok_val = sum(x[2] for x in items)
+    lines = [f"\U0001F433 <b>{ZING_NAME} wallet</b>",
+             f"\U0001F4B0 ADA: <b>{kfmt(ada)}</b>",
+             f"\U0001F4BC Tokens: <b>{kfmt(tok_val)} ADA</b> · Total: <b>{kfmt(ada + tok_val)} ADA</b>", ""]
+    for t, q, v, mc, h24 in items[:15]:
+        extra = f" · MCAP {kfmt(mc)}" if mc else ""
+        extra += f" · 24h {pct(h24)}" if h24 is not None else ""
+        lines.append(f"• <b>{token_name(t)}</b>: {kfmt(q)} ≈ {kfmt(v)} ADA{extra}")
+    if len(items) > 15:
+        lines.append(f"… w {len(items) - 15} tokens khrin")
+    lines.append(f"\n\U0001F517 <a href=\"https://cardanoscan.io/stakekey/{stake}\">Cardanoscan</a>")
+    return "\n".join(lines)
+
+
+def zing_recent_text(n=10):
+    stake = _zing_stake_addr()
+    if not stake:
+        return "Ma kaynach adresse dyal Zing (ZING_ADDR)."
+    tip = koios_get("tip", {})
+    if not tip:
+        return "Koios ma jawbch, 3awd mn b3d."
+    txs = koios_get("account_txs", {"_stake_address": stake,
+                                    "_after_block_height": tip[0].get("block_no", 0) - 20000})
+    if not isinstance(txs, list) or not txs:
+        return "Ma kayn 7tta Tx f had l'iyam."
+    txs = sorted(txs, key=lambda t: (t.get("block_height", 0), t.get("block_time", 0)))[-40:]
+    info = koios("tx_info", {"_tx_hashes": [t["tx_hash"] for t in txs], "_inputs": True, "_assets": True})
+    by = {t["tx_hash"]: t for t in info or []}
+    pending, out = [], []
+    for t in txs:
+        tx = by.get(t["tx_hash"])
+        if not tx:
+            continue
+        try:
+            msgs = zing_classify(tx, stake, pending)
+        except Exception:
+            msgs = []
+        when = datetime.fromtimestamp(t.get("block_time", 0), TZ).strftime("%d/%m %H:%M")
+        for m in msgs:
+            out.append(f"\U0001F552 {when}\n{m}")
+    if not out:
+        return "Ma kayn 7tta buy/sell/transfer f akhir Tx."
+    return f"\U0001F433 <b>Akhir {min(n, len(out))} Tx dyal {ZING_NAME}</b>\n\n" + "\n\n".join(reversed(out[-n:]))
+
+
+def trending_text():
+    try:
+        r = S.post("https://charts.dhapi.io/trending", json={}, timeout=20)
+        lst = r.json() if r.ok else []
+    except Exception:
+        lst = []
+    if not lst:
+        return "Ma jat 7tta data mn DexHunter, 3awd mn b3d."
+    tids = [t["token_id"] for t in lst if t.get("token_id")]
+    info = dexscreener(tids)
+    lines = ["\U0001F525 <b>Trending f DexHunter</b>"]
+    for t in lst[:12]:
+        tid = t.get("token_id")
+        i = info.get(tid) or {}
+        lines.append(f"• <b>{token_name(tid)}</b>: vol {kfmt(num(t.get('current_period_volume')))} ADA"
+                     f" · 24h {pct(i.get('h24'))} · MCAP {kfmt(i.get('mcap_ada'))}"
+                     f" · \U0001F7E2{t.get('amount_buys', 0)}/\U0001F534{t.get('amount_sales', 0)}")
+    return "\n".join(lines)
+
+
+def whales_text():
+    tr = day_rec().get("trades", {})
+    if not tr:
+        return "Mazal ma kayn 7tta big buy/sell lyoum."
+    items = list(tr.values())
+    lines = [f"\U0001F433 <b>Big buys/sells lyoum ({now_local():%d/%m})</b>"]
+    buys = sorted(items, key=lambda x: -x["buy"])[:5]
+    sells = sorted(items, key=lambda x: -x["sell"])[:5]
+    lines.append("\n\U0001F7E2 <b>Akbar chra</b>")
+    for x in buys:
+        if x["buy"] > 0:
+            lines.append(f"• {x['n']}: {kfmt(x['buy'])} ADA ({x['nb']} buys)")
+    lines.append("\n\U0001F534 <b>Akbar bi3</b>")
+    for x in sells:
+        if x["sell"] > 0:
+            lines.append(f"• {x['n']}: {kfmt(x['sell'])} ADA ({x['ns']} sells)")
+    return "\n".join(lines)
+
+
+DISCORD_HELP = ("\U0001F916 <b>Commands</b>\n"
+                "/zing — ach 3nd Zing daba (tokens, qima, MCAP)\n"
+                "/zing_tx — akhir Tx dyal Zing (buy, sell, sifet, jato)\n"
+                "/price SNEK — prix, MCAP, 1h/24h, chart\n"
+                "/trending — tokens li fihom volume daba\n"
+                "/whales — akbar buys w sells lyoum\n"
+                "/summary — résumé dyal nhar")
+
+
+def _chunks(text, size=1900):
+    out, cur = [], ""
+    for line in text.split("\n"):
+        if cur and len(cur) + len(line) + 1 > size:
+            out.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur.strip():
+        out.append(cur)
+    return out
+
+
+def start_discord_bot():
+    if not DISCORD_BOT_TOKEN:
+        return
+    try:
+        import asyncio
+        import threading
+        import discord
+        from discord import app_commands
+    except Exception as e:
+        print("discord.py ma kaynch:", e)
+        return
+
+    intents = discord.Intents.none()
+    intents.guilds = True
+    client = discord.Client(intents=intents)
+    tree = app_commands.CommandTree(client)
+    guild = discord.Object(id=int(DISCORD_GUILD_ID)) if DISCORD_GUILD_ID else None
+
+    async def answer(inter, fn, *args):
+        await inter.response.defer(thinking=True)
+        try:
+            text = await asyncio.get_running_loop().run_in_executor(None, lambda: fn(*args))
+        except Exception as e:
+            text = f"Wa9e3 chi mochkil: {e}"
+        for c in _chunks(html_to_md(text)):
+            await inter.followup.send(c, suppress_embeds=True)
+
+    @tree.command(name="zing", description="Ach 3nd Zing daba (tokens, qima, MCAP)", guild=guild)
+    async def c_zing(inter: discord.Interaction):
+        await answer(inter, zing_holdings_text)
+
+    @tree.command(name="zing_tx", description="Akhir Tx dyal Zing (buy, sell, sifet, jato)", guild=guild)
+    @app_commands.describe(n="Ch7al mn Tx (1-20)")
+    async def c_zing_tx(inter: discord.Interaction, n: app_commands.Range[int, 1, 20] = 10):
+        await answer(inter, zing_recent_text, n)
+
+    @tree.command(name="price", description="Prix, MCAP, 1h/24h w chart dyal token", guild=guild)
+    @app_commands.describe(token="Smiya (b7al SNEK) wla CA")
+    async def c_price(inter: discord.Interaction, token: str):
+        await answer(inter, cmd_price, token)
+
+    @tree.command(name="trending", description="Tokens li fihom volume daba f DexHunter", guild=guild)
+    async def c_trending(inter: discord.Interaction):
+        await answer(inter, trending_text)
+
+    @tree.command(name="whales", description="Akbar big buys w sells lyoum", guild=guild)
+    async def c_whales(inter: discord.Interaction):
+        await answer(inter, whales_text)
+
+    @tree.command(name="summary", description="Résumé dyal nhar", guild=guild)
+    async def c_summary(inter: discord.Interaction):
+        await answer(inter, summary_text)
+
+    @tree.command(name="help", description="Lista dyal commands", guild=guild)
+    async def c_help(inter: discord.Interaction):
+        await answer(inter, lambda: DISCORD_HELP)
+
+    @client.event
+    async def on_ready():
+        try:
+            synced = await tree.sync(guild=guild)
+            print(f"Discord bot wajed: {client.user} ({len(synced)} commands)")
+        except Exception as e:
+            print("Discord sync error:", e)
+
+    def runner():
+        try:
+            asyncio.run(client.start(DISCORD_BOT_TOKEN))
+        except Exception as e:
+            print("Discord bot error:", e)
+
+    threading.Thread(target=runner, daemon=True).start()
+
+
 # =============== main ===============
 def main():
     if not (KEY and TG_TOKEN and TG_CHAT):
         print("Khass DEXHUNTER_KEY, TG_TOKEN w TG_CHAT_ID f GitHub Secrets.")
         sys.exit(1)
     load_state()
+    start_discord_bot()
     state["streaks"] = {}  # kat3awd tbna mn l'lookback
     seen = set()
     try:
